@@ -36,7 +36,7 @@ public final class Updater {
      * {@code https://github.com/<owner>/<repo>/releases/latest/download/update.json}.
      * Empty disables the whole feature.
      */
-    public static final String MANIFEST_URL = "";
+    public static final String MANIFEST_URL = "https://github.com/Mccking/mccx/releases/latest/download/update.json";
 
     public interface Log {
         void log(String line);
@@ -197,3 +197,4 @@ public final class Updater {
         return hex.toString();
     }
 }
+

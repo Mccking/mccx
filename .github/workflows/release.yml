@@ -73,14 +73,19 @@ jobs:
             "commit=$sha" >> $env:GITHUB_OUTPUT
           }
 
+      - name: Resolve version
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          # GitHub expressions have no arithmetic; compute here and export.
+          echo "VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=3.3.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "APK_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/build-${GITHUB_RUN_NUMBER}/mccx-3.3.${GITHUB_RUN_NUMBER}.apk" >> "$GITHUB_ENV"
+          echo "NOTES=upstream ${{ steps.sync.outputs.commit }}" >> "$GITHUB_ENV"
+
       - name: Build
         if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         env:
-          VERSION_CODE: ${{ github.run_number + 1000 }}
-          VERSION_NAME: 3.2.${{ github.run_number }}
-          APK_URL: https://github.com/${{ github.repository }}/releases/download/build-${{ github.run_number }}/mccx-3.2.${{ github.run_number }}.apk
           KS_PASS: ${{ secrets.MCCX_KEYSTORE_PASS }}
-          NOTES: upstream ${{ steps.sync.outputs.commit }}
         run: bash tools/build.sh
 
       - name: Publish release
@@ -88,12 +93,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: MccX 3.2.${{ github.run_number }} (upstream ${{ steps.sync.outputs.commit }})
+          name: MccX 3.3.${{ github.run_number }}
           body: |
             Auto-built from upstream `${{ steps.sync.outputs.commit || 'unchanged' }}`.
-            versionCode ${{ github.run_number + 1000 }}.
+            versionCode is 1000 + the run number.
           files: |
-            dist/mccx-3.2.${{ github.run_number }}.apk
+            dist/mccx-3.3.${{ github.run_number }}.apk
             dist/update.json
 
 

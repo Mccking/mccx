@@ -16,6 +16,29 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
+# A stale http.proxy in git config makes both git and GCM fail with "connection
+# refused" against a port nobody is listening on. Drop such a setting before
+# touching the network, and say so instead of dying three layers down.
+function Repair-GitProxy {
+    foreach ($key in 'http.proxy', 'https.proxy') {
+        $value = (git config --global --get $key)
+        if (-not $value) { continue }
+        $hostName, $port = '127.0.0.1', 8080
+        try {
+            $uri = [uri]$value
+            $hostName = $uri.Host
+            if ($uri.Port -gt 0) { $port = $uri.Port }
+        } catch {
+            continue
+        }
+        $open = Test-NetConnection -ComputerName $hostName -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
+        if (-not $open) {
+            Write-Host "git $key = $value，但 $hostName`:$port 没有监听，临时取消该代理设置"
+            git config --global --unset $key
+        }
+    }
+}
+
 function Get-GitHubToken {
     $gcm = 'C:\Program Files\Git\mingw64\bin\git-credential-manager.exe'
     $accounts = ''
@@ -53,6 +76,7 @@ function Get-GitHubToken {
     return ($line.Line -replace '^password=', '')
 }
 
+Repair-GitProxy
 Write-Host "== GitHub 认证 =="
 Write-Host '如果弹出登录窗口，请在浏览器里完成授权…'
 $token = Get-GitHubToken
@@ -159,4 +183,5 @@ Write-Host "仓库地址   https://github.com/$Owner/$Repo"
 Write-Host "更新地址   https://github.com/$Owner/$Repo/releases/latest/download/update.json"
 Write-Host ''
 Write-Host '最后一步：把 src/com/xehn/warp/Updater.java 的 MANIFEST_URL 改成上面的更新地址，重打一次包并安装。'
+
 

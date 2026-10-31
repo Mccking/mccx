@@ -1,0 +1,20 @@
+# build outputs
+build/
+dist/
+
+# local engine binaries (CI rebuilds the launcher, downloads mihomo)
+libs/**/*.so
+
+# signing material never leaves the machine
+keystore.jks
+*.jks
+*.keystore
+
+# local test scaffolding
+harness/out/
+harness/lib/
+harness/mihomo-test.yaml
+
+# archives / scratch
+*.zip
+*.log

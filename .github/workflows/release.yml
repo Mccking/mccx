@@ -1,0 +1,98 @@
+name: mccx-release
+
+# Daily watch on the upstream engine data, plus manual runs.
+on:
+  schedule:
+    - cron: '0 20 * * *'   # 04:00 Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MIHOMO_VER: v1.19.33
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Android SDK packages
+        run: sdkmanager "platforms;android-34" "build-tools;35.0.0"
+
+      - name: Restore signing key
+        env:
+          KS_BASE64: ${{ secrets.MCCX_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KS_BASE64" ]; then
+            echo "::error::缺少 MCCX_KEYSTORE_BASE64，签名必须与已装版本一致"
+            exit 1
+          fi
+          printf '%s' "$KS_BASE64" | base64 -d > keystore.jks
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build fd launcher
+        run: |
+          cd core
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
+            -o ../libs/arm64-v8a/libmccxcore.so .
+
+      - name: Fetch mihomo engine (optional)
+        run: |
+          mkdir -p libs/arm64-v8a
+          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-android-arm64-v8-${MIHOMO_VER}.gz"
+          if curl -fsSL "$url" -o /tmp/mihomo.gz; then
+            gunzip -c /tmp/mihomo.gz > libs/arm64-v8a/libmihomo.so
+            chmod +x libs/arm64-v8a/libmihomo.so
+            echo "mihomo $(stat -c%s libs/arm64-v8a/libmihomo.so) bytes"
+          else
+            echo "mihomo 未取到，本次构建不含内核（探测按钮会提示未打包）"
+          fi
+
+      - name: Sync upstream constants
+        id: sync
+        shell: pwsh
+        run: |
+          ./tools/sync_upstream.ps1
+          $changed = (git status --porcelain src/com/xehn/warp/UpstreamDefaults.java).Length -gt 0
+          Write-Host "upstream drift: $changed"
+          "changed=$($changed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($changed) {
+            $sha = (Select-String -Path src/com/xehn/warp/UpstreamDefaults.java -Pattern 'UPSTREAM_COMMIT = "([0-9a-f]+)"').Matches[0].Groups[1].Value
+            "commit=$sha" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Build
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          VERSION_CODE: ${{ github.run_number + 1000 }}
+          VERSION_NAME: 3.1.${{ github.run_number }}
+          APK_URL: https://github.com/${{ github.repository }}/releases/download/build-${{ github.run_number }}/mccx-3.1.${{ github.run_number }}.apk
+          KS_PASS: ${{ secrets.MCCX_KEYSTORE_PASS }}
+          NOTES: upstream ${{ steps.sync.outputs.commit }}
+        run: bash tools/build.sh
+
+      - name: Publish release
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: MccX 3.1.${{ github.run_number }} (upstream ${{ steps.sync.outputs.commit }})
+          body: |
+            Auto-built from upstream `${{ steps.sync.outputs.commit || 'unchanged' }}`.
+            versionCode ${{ github.run_number + 1000 }}.
+          files: |
+            dist/mccx-3.1.${{ github.run_number }}.apk
+            dist/update.json
+

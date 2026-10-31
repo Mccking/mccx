@@ -9,7 +9,8 @@ param(
     [string]$Owner = 'Mccking',
     [string]$Repo = 'mccx',
     [switch]$Private,
-    [string]$KeystorePass = 'xehn-apk'
+    [string]$KeystorePass = 'xehn-apk',
+    [string]$Token = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,7 +22,11 @@ function Get-GitHubToken {
     if (Test-Path $gcm) {
         $accounts = (& $gcm github list 2>$null | Out-String).Trim()
     }
-    if (-not $accounts) {
+    if ($Token) {
+        Write-Host '使用传入的 PAT 登录…'
+        & $gcm github login --pat $Token
+    }
+    if (-not $accounts -and -not $Token) {
         Write-Host '未发现已登录的 GitHub 账号，开始授权…'
         if (Test-Path $gcm) {
             & $gcm github login --browser

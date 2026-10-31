@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.xehn.warp"
-    android:versionCode="1000"
-    android:versionName="3.3">
+    package="com.xehn.warp">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -56,5 +54,6 @@
         </service>
     </application>
 </manifest>
+
 
 

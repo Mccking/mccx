@@ -16,11 +16,34 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
 function Get-GitHubToken {
+    $gcm = 'C:\Program Files\Git\mingw64\bin\git-credential-manager.exe'
+    $accounts = ''
+    if (Test-Path $gcm) {
+        $accounts = (& $gcm github list 2>$null | Out-String).Trim()
+    }
+    if (-not $accounts) {
+        Write-Host '未发现已登录的 GitHub 账号，开始授权…'
+        if (Test-Path $gcm) {
+            & $gcm github login --browser
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host '浏览器流程未完成，改用设备码（会给出一个 8 位码，在 github.com/login/device 输入）…'
+                & $gcm github login --device
+            }
+        } else {
+            Write-Host '没有找到 GCM，请先执行一次 git push 完成登录'
+        }
+    }
+
+    # Only now is non-interactive safe: the credential should already be stored.
     $env:GIT_TERMINAL_PROMPT = '0'
-    $cred = "protocol=https`nhost=github.com`nusername=`n`n" | & git credential fill 2>$null
+    $cred = "protocol=https`nhost=github.com`n`n" | & git credential fill 2>$null
     $line = $cred | Select-String '^password=' | Select-Object -First 1
     if (-not $line) {
-        throw '没有拿到 GitHub 凭据（登录窗被取消或超时）'
+        Write-Host ''
+        Write-Host '仍然没有拿到凭据。两种办法任选其一：'
+        Write-Host "  1) 直接跑一次 git push，浏览器里登录后凭据会被记住，再回来执行本脚本"
+        Write-Host "  2) 用 PAT 登录：& '$gcm' github login --pat ghp_你的token（scope 勾 repo + workflow）"
+        throw '没有拿到 GitHub 凭据'
     }
     return ($line.Line -replace '^password=', '')
 }
@@ -131,3 +154,4 @@ Write-Host "仓库地址   https://github.com/$Owner/$Repo"
 Write-Host "更新地址   https://github.com/$Owner/$Repo/releases/latest/download/update.json"
 Write-Host ''
 Write-Host '最后一步：把 src/com/xehn/warp/Updater.java 的 MANIFEST_URL 改成上面的更新地址，重打一次包并安装。'
+

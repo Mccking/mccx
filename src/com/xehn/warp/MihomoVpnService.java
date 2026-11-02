@@ -40,6 +40,34 @@ public final class MihomoVpnService extends android.net.VpnService {
     public static volatile boolean running;
     public static volatile String lastLog = "";
 
+    /**
+     * Last lines of the engine's own output. A sticky service restart is silent,
+     * so the only way to explain a failure to the user is to keep its log tail.
+     */
+    private static final java.util.ArrayDeque<String> RECENT = new java.util.ArrayDeque<String>();
+
+    public static String recentLog() {
+        synchronized (RECENT) {
+            StringBuilder b = new StringBuilder();
+            for (String line : RECENT) {
+                if (b.length() > 0) {
+                    b.append('\n');
+                }
+                b.append(line);
+            }
+            return b.toString();
+        }
+    }
+
+    private static void remember(String line) {
+        synchronized (RECENT) {
+            RECENT.addLast(line);
+            while (RECENT.size() > 20) {
+                RECENT.removeFirst();
+            }
+        }
+    }
+
     private ParcelFileDescriptor tun;
     private Process core;
 
@@ -57,7 +85,9 @@ public final class MihomoVpnService extends android.net.VpnService {
             return START_NOT_STICKY;
         }
         startTunnel(config);
-        return START_STICKY;
+        // NOT_STICKY on purpose: a sticky service is restarted by the system with
+        // a null intent, which used to look like "it reconnected after I stopped it".
+        return START_NOT_STICKY;
     }
 
     private void startTunnel(String configPath) {
@@ -100,12 +130,14 @@ public final class MihomoVpnService extends android.net.VpnService {
             pb.redirectErrorStream(true);
             core = pb.start();
             startLogPump(core);
+            watchExit(core);
 
             if (!handOverFd(tun.getFileDescriptor())) {
                 throw new IOException("启动器没有接收 tun fd");
             }
             running = true;
             lastLog = "mihomo 已接管隧道";
+            remember("mihomo 已接管隧道");
             Log.i(TAG, "tunnel handed to mihomo");
         } catch (Exception e) {
             lastLog = "启动失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -145,12 +177,36 @@ public final class MihomoVpnService extends android.net.VpnService {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastLog = line;
+                        remember(line);
                         Log.i(TAG, line);
                     }
                 } catch (Exception ignored) {
                 }
             }
         }, "mihomo-log").start();
+    }
+
+    /** Reports an engine that died on its own instead of silently dropping the tunnel. */
+    private void watchExit(final Process process) {
+        new Thread(new Runnable() {
+            public void run() {
+                int code;
+                try {
+                    code = process.waitFor();
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (core != process) {
+                    return;
+                }
+                lastLog = "mihomo 退出，code=" + code;
+                remember(lastLog);
+                if (running) {
+                    running = false;
+                    stopTunnel();
+                }
+            }
+        }, "mihomo-exit").start();
     }
 
     private void stopTunnel() {

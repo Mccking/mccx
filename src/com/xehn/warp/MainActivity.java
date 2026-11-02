@@ -70,6 +70,11 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private volatile String exitInfo = "";
     private Tunnel.State lastState = Tunnel.State.DOWN;
     private volatile boolean retriedFixed;
+    /** Bumped on every user disconnect so in-flight retries cannot resurrect the tunnel. */
+    private volatile int stopToken;
+    /** True between a user disconnect and the next explicit connect. */
+    private volatile boolean userDown;
+    private int recloseCount;
 
     private final Warp.Log logger = new Warp.Log() {
         public void log(String line) {
@@ -339,6 +344,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     private void startConnect() {
+        userDown = false;
+        recloseCount = 0;
         busy = true;
         exitInfo = "";
         retriedFixed = false;
@@ -400,9 +407,16 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             ui.postDelayed(new Runnable() {
                 public void run() {
                     busy = false;
-                    log(MihomoVpnService.running
-                            ? "mihomo 已接管隧道"
-                            : "mihomo 未启动：" + MihomoVpnService.lastLog);
+                    if (MihomoVpnService.running) {
+                        log("mihomo 已接管隧道");
+                    } else {
+                        log("mihomo 未启动：" + MihomoVpnService.lastLog);
+                        String engineLog = MihomoVpnService.recentLog();
+                        if (!engineLog.isEmpty()) {
+                            log("—— 内核输出 ——");
+                            log(engineLog);
+                        }
+                    }
                     render();
                 }
             }, 3000);
@@ -412,6 +426,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     private void startDisconnect() {
+        // Any in-flight handshake watcher or endpoint retry must not fire after
+        // this point; the user asked for "off", not "try again".
+        stopToken++;
+        userDown = true;
         busy = true;
         render();
         if (MihomoVpnService.running) {
@@ -475,12 +493,13 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * handshake, and fall back to the canonical endpoint once if it never comes.
      */
     private void watchHandshake() {
+        final int token = stopToken;
         new Thread(new Runnable() {
             public void run() {
                 TunnelManager.Snapshot last = null;
                 for (int i = 0; i < 6; i++) {
                     sleep(2000);
-                    if (TunnelManager.state() != Tunnel.State.UP) {
+                    if (token != stopToken || TunnelManager.state() != Tunnel.State.UP) {
                         return;
                     }
                     last = TunnelManager.snapshot();
@@ -497,13 +516,16 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         return;
                     }
                 }
+                if (token != stopToken) {
+                    return;
+                }
                 // Only rebuild the tunnel on positive evidence: bytes went out
                 // and not one came back. Anything less and a working tunnel
                 // might be torn down for nothing.
                 if (last != null && last.available && last.tx > 0 && last.rx == 0 && !retriedFixed) {
                     retriedFixed = true;
                     log("发出 " + last.tx + "B，收到 0B：改用默认端点重试");
-                    reconnectWithFixedEndpoint();
+                    reconnectWithFixedEndpoint(token);
                     return;
                 }
                 startSelfCheck();
@@ -511,18 +533,25 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }, "xehn-handshake").start();
     }
 
-    private void reconnectWithFixedEndpoint() {
+    private void reconnectWithFixedEndpoint(final int token) {
         log("改用默认端点 engage.cloudflareclient.com:2408 重试…");
         new Thread(new Runnable() {
             public void run() {
                 try {
                     Warp.Account account = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
                     final Warp.Result fixed = Warp.generateFixed("wg", Warp.DEFAULT_ENDPOINT, account, logger);
+                    if (token != stopToken) {
+                        log("已取消自动重试");
+                        return;
+                    }
                     lastEndpoint = fixed.endpoint;
                     lastLatency = -1;
                     TunnelManager.down();
                     ui.post(new Runnable() {
                         public void run() {
+                            if (token != stopToken) {
+                                return;
+                            }
                             applyUp(fixed.config);
                         }
                     });
@@ -590,6 +619,24 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
     @Override
     public void onTunnelState(final Tunnel.State state) {
+        // A VPN that comes back up right after the user switched it off is almost
+        // always the system (always-on VPN) or a stale retry; honour the user.
+        if (state == Tunnel.State.UP && userDown) {
+            if (recloseCount++ < 2) {
+                log("隧道被重新拉起，正在再次关闭…");
+                new Thread(new Runnable() {
+                    public void run() {
+                        try {
+                            TunnelManager.down();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }, "xehn-reclose").start();
+            } else {
+                log("隧道反复被系统拉起：多半开启了系统设置里的『始终开启的 VPN』，关掉它即可");
+            }
+            return;
+        }
         ui.post(new Runnable() {
             public void run() {
                 busy = false;
@@ -815,6 +862,11 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
+
+
 
 
 

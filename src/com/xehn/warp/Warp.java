@@ -1,12 +1,18 @@
 package com.xehn.warp;
 
 import org.json.JSONArray;
+
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -14,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.Dns;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -43,6 +50,10 @@ public final class Warp {
     private static final int READ_TIMEOUT_MS = 20000;
     private static final int PROBE_TIMEOUT_MS = 900;
     private static final int PROBE_THREADS = 16;
+    /** Finalists that get a real download before the endpoint is chosen. */
+    private static final int SPEED_PROBE_COUNT = 2;
+    private static final int SPEED_PROBE_BYTES = 512 * 1024;
+    private static final long SPEED_PROBE_DEADLINE_MS = 2500;
 
     private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
             .connectTimeout(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -160,11 +171,11 @@ public final class Warp {
         long latency = -1;
         if (scan) {
             log.log("扫描优选端点（" + SCAN_IPS.length + " 个候选）…");
-            Probe best = rankEndpoints();
+            Probe best = rankEndpoints(log);
             if (best != null) {
                 endpoint = best.ip + ":" + port;
                 latency = best.millis;
-                log.log("最优端点：" + best.ip + "  " + best.millis + " ms");
+                log.log(String.format(java.util.Locale.US, "最优端点：%s  %d ms  %.1f MB/s", best.ip, best.millis, best.bytesPerSecond / 1048576.0));
             } else {
                 log.log("扫描无结果，退回默认端点 " + DEFAULT_ENDPOINT);
             }
@@ -293,6 +304,7 @@ public final class Warp {
     private static final class Probe {
         final String ip;
         final long millis;
+        long bytesPerSecond;
 
         Probe(String ip, long millis) {
             this.ip = ip;
@@ -300,7 +312,13 @@ public final class Warp {
         }
     }
 
-    private static Probe rankEndpoints() throws InterruptedException {
+    /**
+     * Ranks edges the way CloudflareSpeedTest does: latency first to cut the
+     * list down, then a real download through each finalist. A 20 ms edge that
+     * pushes 200 KB/s is worse than a 60 ms edge that pushes 8 MB/s.
+     */
+    private static Probe rankEndpoints(Log log) throws InterruptedException {
+        List<Probe> alive = new ArrayList<Probe>();
         ExecutorService pool = Executors.newFixedThreadPool(PROBE_THREADS);
         List<Future<Probe>> futures = new ArrayList<Future<Probe>>();
         try {
@@ -314,27 +332,91 @@ public final class Warp {
             pool.shutdown();
             pool.awaitTermination(PROBE_TIMEOUT_MS * 4L, TimeUnit.MILLISECONDS);
 
-            Probe best = null;
             for (Future<Probe> f : futures) {
                 if (!f.isDone() || f.isCancelled()) {
                     continue;
                 }
-                Probe p;
                 try {
-                    p = f.get();
-                } catch (Exception e) {
-                    continue;
-                }
-                if (p != null && (best == null || p.millis < best.millis)) {
-                    best = p;
+                    Probe p = f.get();
+                    if (p != null) {
+                        alive.add(p);
+                    }
+                } catch (Exception ignored) {
                 }
             }
-            return best;
         } finally {
             pool.shutdownNow();
         }
+        if (alive.isEmpty()) {
+            return null;
+        }
+
+        Collections.sort(alive, new Comparator<Probe>() {
+            public int compare(Probe a, Probe b) {
+                return a.millis < b.millis ? -1 : (a.millis > b.millis ? 1 : 0);
+            }
+        });
+
+        int finalists = Math.min(SPEED_PROBE_COUNT, alive.size());
+        Probe best = null;
+        for (int i = 0; i < finalists; i++) {
+            Probe candidate = alive.get(i);
+            candidate.bytesPerSecond = measureThroughput(candidate.ip);
+            log.log(String.format(java.util.Locale.US, "候选 %s  %d ms  %.1f MB/s",
+                    candidate.ip, candidate.millis, candidate.bytesPerSecond / 1048576.0));
+            if (best == null || candidate.bytesPerSecond > best.bytesPerSecond) {
+                best = candidate;
+            }
+        }
+        // Nothing measurable (small quota, captive portal): latency decides.
+        if (best == null || best.bytesPerSecond == 0) {
+            return alive.get(0);
+        }
+        return best;
     }
 
+    /** One download through a pinned edge, so the measurement is real traffic. */
+    private static long measureThroughput(final String ip) {
+        Dns pinned = new Dns() {
+            public List<InetAddress> lookup(String hostname) throws UnknownHostException {
+                return Collections.singletonList(InetAddress.getByName(ip));
+            }
+        };
+        OkHttpClient client = CLIENT.newBuilder()
+                .dns(pinned)
+                .readTimeout(6, TimeUnit.SECONDS)
+                .build();
+        Request request = new Request.Builder()
+                .url("https://speed.cloudflare.com/__down?bytes=" + SPEED_PROBE_BYTES)
+                .header("User-Agent", USER_AGENT)
+                .build();
+        long started = System.nanoTime();
+        long bytes = 0;
+        Response response = null;
+        try {
+            response = client.newCall(request).execute();
+            if (!response.isSuccessful() || response.body() == null) {
+                return 0;
+            }
+            InputStream in = response.body().byteStream();
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while (bytes < SPEED_PROBE_BYTES && (read = in.read(buffer)) > 0) {
+                if ((System.nanoTime() - started) / 1000000L > SPEED_PROBE_DEADLINE_MS) {
+                    break;
+                }
+                bytes += read;
+            }
+        } catch (Exception e) {
+            return 0;
+        } finally {
+            if (response != null) {
+                response.close();
+            }
+        }
+        long millis = Math.max(1L, (System.nanoTime() - started) / 1000000L);
+        return bytes * 1000L / millis;
+    }
     private static Probe probe(String ip) {
         Socket socket = new Socket();
         long started = System.nanoTime();
@@ -421,6 +503,10 @@ public final class Warp {
         return out.toString();
     }
 }
+
+
+
+
 
 
 

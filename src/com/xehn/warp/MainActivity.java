@@ -70,6 +70,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private volatile String exitInfo = "";
     private Tunnel.State lastState = Tunnel.State.DOWN;
     private volatile boolean retriedFixed;
+    /** Ports to try in order; the first entry is what the user picked. */
+    private volatile int[] portPlan = {0};
+    private volatile int portAttempt;
+    private volatile String endpointHost = "";
     /** Bumped on every user disconnect so in-flight retries cannot resurrect the tunnel. */
     private volatile int stopToken;
     /** True between a user disconnect and the next explicit connect. */
@@ -171,7 +175,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             ports.add(String.valueOf(p));
         }
         portSpinner.setAdapter(ports);
-        portSpinner.setSelection(prefs().getInt(KEY_PORT, 0));
+        portSpinner.setSelection(prefs().getInt(KEY_PORT, 2));  // 1701 by default
         portRow.addView(portSpinner, new LinearLayout.LayoutParams(dp(110), dp(44)));
         column.addView(portRow);
 
@@ -343,6 +347,27 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
     }
 
+    /** Selected port first, then 1701/2408/443/500 — the order this device found usable. */
+    private static int[] orderPorts(int selected) {
+        int[] order = new int[PORTS.length];
+        int n = 0;
+        order[n++] = selected;
+        int[] preferred = {2, 0, 3, 1};
+        for (int idx : preferred) {
+            boolean seen = false;
+            for (int i = 0; i < n; i++) {
+                if (order[i] == idx) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                order[n++] = idx;
+            }
+        }
+        return order;
+    }
+
     private void startConnect() {
         userDown = false;
         recloseCount = 0;
@@ -357,6 +382,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         final int portIndex = Math.max(0, portSpinner.getSelectedItemPosition());
         final int port = PORTS[portIndex];
         final boolean useMihomo = engineSpinner.getSelectedItemPosition() == 1;
+        portPlan = orderPorts(portIndex);
+        portAttempt = 0;
 
         new Thread(new Runnable() {
             public void run() {
@@ -369,6 +396,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                             .apply();
                     lastEndpoint = result.endpoint;
                     lastLatency = result.latencyMs;
+                    int split = result.endpoint.lastIndexOf(':');
+                    endpointHost = split > 0 ? result.endpoint.substring(0, split) : result.endpoint;
 
                     final String configText = result.config;
                     final Warp.Result finalResult = result;
@@ -511,7 +540,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         log(TunnelManager.statsLine());
                     }
                     if (last.handshakeMs > 0) {
-                        log("握手成功");
+                        log("握手成功（端口 " + PORTS[portPlan[portAttempt]] + "）");
+                        prefs().edit().putInt(KEY_PORT, portPlan[portAttempt]).apply();
                         startSelfCheck();
                         return;
                     }
@@ -522,15 +552,57 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 // Only rebuild the tunnel on positive evidence: bytes went out
                 // and not one came back. Anything less and a working tunnel
                 // might be torn down for nothing.
-                if (last != null && last.available && last.tx > 0 && last.rx == 0 && !retriedFixed) {
-                    retriedFixed = true;
-                    log("发出 " + last.tx + "B，收到 0B：改用默认端点重试");
-                    reconnectWithFixedEndpoint(token);
+                if (last != null && last.available && last.tx > 0 && last.rx == 0) {
+                    if (portAttempt + 1 < portPlan.length) {
+                        int failed = portPlan[portAttempt];
+                        portAttempt++;
+                        int next = portPlan[portAttempt];
+                        log("端口 " + PORTS[failed] + " 没有回包，改试 " + PORTS[next] + "…");
+                        reconnectWithPort(token, next);
+                        return;
+                    }
+                    if (!retriedFixed) {
+                        retriedFixed = true;
+                        log("四个端口都没有回包，改用默认端点 " + Warp.DEFAULT_ENDPOINT);
+                        reconnectWithFixedEndpoint(token);
+                        return;
+                    }
+                    log("端口与默认端点都试过了：当前网络很可能封了 WARP 的 UDP");
                     return;
                 }
                 startSelfCheck();
             }
         }, "xehn-handshake").start();
+    }
+
+    /** Rebuilds the tunnel against the same edge on a different port. */
+    private void reconnectWithPort(final int token, final int portIndex) {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Warp.Account account = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
+                    final Warp.Result retry = Warp.generateFixed(
+                            "wg", endpointHost + ":" + PORTS[portIndex], account, logger);
+                    if (token != stopToken) {
+                        log("已取消端口重试");
+                        return;
+                    }
+                    lastEndpoint = retry.endpoint;
+                    lastLatency = -1;
+                    TunnelManager.down();
+                    ui.post(new Runnable() {
+                        public void run() {
+                            if (token != stopToken) {
+                                return;
+                            }
+                            applyUp(retry.config);
+                        }
+                    });
+                } catch (final Exception e) {
+                    fail(e);
+                }
+            }
+        }, "xehn-port-retry").start();
     }
 
     private void reconnectWithFixedEndpoint(final int token) {
@@ -862,6 +934,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
 
 
 

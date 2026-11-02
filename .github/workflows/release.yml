@@ -85,8 +85,9 @@ jobs:
         run: |
           # GitHub expressions have no arithmetic; compute here and export.
           echo "VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
-          echo "VERSION_NAME=3.3.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-          echo "APK_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/build-${GITHUB_RUN_NUMBER}/mccx-3.3.${GITHUB_RUN_NUMBER}.apk" >> "$GITHUB_ENV"
+          BASE_VERSION="$(tr -d ' \t\r\n' < version.txt)"
+          echo "VERSION_NAME=${BASE_VERSION}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "APK_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/build-${GITHUB_RUN_NUMBER}/mccx-${BASE_VERSION}.${GITHUB_RUN_NUMBER}.apk" >> "$GITHUB_ENV"
           echo "NOTES=upstream ${{ steps.sync.outputs.commit }}" >> "$GITHUB_ENV"
 
       - name: Build
@@ -100,13 +101,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: MccX 3.3.${{ github.run_number }}
+          name: MccX ${{ github.run_number }}
           body: |
             Auto-built from upstream `${{ steps.sync.outputs.commit || 'unchanged' }}`.
             versionCode is 1000 + the run number.
           files: |
-            dist/mccx-3.3.${{ github.run_number }}.apk
+            dist/*.apk
             dist/update.json
+
 
 
 

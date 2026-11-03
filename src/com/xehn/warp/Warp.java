@@ -276,11 +276,17 @@ public final class Warp {
     }
 
     private static String request(String method, String url, String body, String token) throws IOException {
+        return requestAs(method, url, body, token, USER_AGENT, CF_CLIENT_VERSION);
+    }
+
+    /** Same call with an explicit client identity (the MASQUE API wants its own). */
+    static String requestAs(String method, String url, String body, String token,
+                            String userAgent, String clientVersion) throws IOException {
         RequestBody payload = body == null ? null : RequestBody.create(JSON, body);
         Request.Builder builder = new Request.Builder()
                 .url(url)
-                .header("User-Agent", USER_AGENT)
-                .header("CF-Client-Version", CF_CLIENT_VERSION)
+                .header("User-Agent", userAgent)
+                .header("CF-Client-Version", clientVersion)
                 .header("Accept", "application/json")
                 .method(method, payload);
         if (token != null && token.length() > 0) {
@@ -503,6 +509,7 @@ public final class Warp {
         return out.toString();
     }
 }
+
 
 
 

@@ -14,6 +14,7 @@ import android.graphics.Typeface;
 import android.net.VpnService;
 import android.os.Bundle;
 import android.os.Handler;
+import android.provider.Settings;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.View;
@@ -49,6 +50,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private static final String PREFS = "xehn";
     private static final String KEY_ACCOUNT = "account";
     private static final String KEY_PORT = "port_index";
+    private static final String KEY_MASQUE = "masque_account";
     private static final int[] PORTS = {2408, 500, 1701, 443};
     private static final int LOG_LINES = 12;
 
@@ -63,7 +65,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private Spinner portSpinner;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
-    private boolean pendingMihomo;
+    private int pendingEngine;
 
     private volatile boolean busy;
     private String pendingConfig;
@@ -80,6 +82,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private volatile int stopToken;
     /** True between a user disconnect and the next explicit connect. */
     private volatile boolean userDown;
+    /** True once the tunnel actually carries traffic (handshake or engine probe). */
+    private volatile boolean connectionReady;
     private int recloseCount;
 
     private final Warp.Log logger = new Warp.Log() {
@@ -239,6 +243,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         engines.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         engines.add("内置 WireGuard");
         engines.add("mihomo（实验）");
+        engines.add("mihomo · MASQUE（实验）");
         engineSpinner.setAdapter(engines);
         card.addView(settingsRow("隧道引擎", engineSpinner));
         card.addView(divider());
@@ -442,6 +447,15 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             connectButton.setText("请稍候");
             connectButton.setEnabled(false);
             styleConnectButton(false, true);
+        } else if (up && !connectionReady) {
+            // The TUN exists but no handshake yet: saying "connected" here is
+            // what made the app look connected while nothing loaded.
+            statusView.setText("等待握手…");
+            statusView.setTextColor(C_WARN);
+            statusDot.setTextColor(C_WARN);
+            connectButton.setText("断开");
+            connectButton.setEnabled(true);
+            styleConnectButton(true, true);
         } else if (up) {
             statusView.setText("已连接");
             statusView.setTextColor(C_OK);
@@ -524,7 +538,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
         final int portIndex = Math.max(0, portSpinner.getSelectedItemPosition());
         final int port = PORTS[portIndex];
-        final boolean useMihomo = engineSpinner.getSelectedItemPosition() == 1;
+        final int engine = engineSpinner.getSelectedItemPosition();
         portPlan = orderPorts(portIndex);
         portAttempt = 0;
 
@@ -549,11 +563,11 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                             Intent consent = VpnService.prepare(MainActivity.this);
                             if (consent != null) {
                                 pendingConfig = configText;
-                                pendingMihomo = useMihomo;
+                                pendingEngine = engine;
                                 pendingResult = finalResult;
                                 startActivityForResult(consent, REQ_VPN);
                             } else {
-                                launch(useMihomo, configText, finalResult);
+                                launch(engine, configText, finalResult);
                             }
                         }
                     });
@@ -565,44 +579,98 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     /** Starts the selected engine; mihomo runs in its own VpnService process. */
-    private void launch(boolean mihomo, String configText, Warp.Result result) {
-        if (!mihomo) {
+    /**
+     * Starts the engine the user picked: 0 = built-in WireGuard, 1 = mihomo with
+     * a wireguard outbound, 2 = mihomo with a MASQUE outbound (EC keys, port 443).
+     */
+    private void launch(int engine, String configText, Warp.Result result) {
+        if (engine == 0) {
             applyUp(configText);
+            return;
+        }
+        if (engine == 2) {
+            startMasqueEngine();
             return;
         }
         try {
             int split = result.endpoint.lastIndexOf(':');
             String host = result.endpoint.substring(0, split);
             int port = Integer.parseInt(result.endpoint.substring(split + 1));
-            MihomoVpnService.start(this, MihomoConfig.build(result.account, host, port, false, false));
-            log("mihomo 内核启动中…");
-            ui.postDelayed(new Runnable() {
-                public void run() {
-                    busy = false;
-                    if (MihomoVpnService.running) {
-                        log("mihomo 已接管隧道");
-                        String tail = MihomoVpnService.recentLog();
-                        if (!tail.isEmpty()) {
-                            log("—— 内核输出 ——");
-                            log(tail);
-                        }
-                        startMihomoCheck();
-                    } else {
-                        log("mihomo 未启动：" + MihomoVpnService.lastLog);
-                        String engineLog = MihomoVpnService.recentLog();
-                        if (!engineLog.isEmpty()) {
-                            log("—— 内核输出 ——");
-                            log(engineLog);
-                        }
-                    }
-                    render();
-                }
-            }, 3000);
+            startMihomoEngine(MihomoConfig.build(result.account, host, port, false, false));
         } catch (Exception e) {
             fail(e);
         }
     }
 
+    private void startMihomoEngine(String yaml) {
+        try {
+            MihomoVpnService.start(this, yaml);
+            log("mihomo 内核启动中…");
+            scheduleEngineCheck();
+        } catch (Exception e) {
+            fail(e);
+        }
+    }
+
+    /** MASQUE does not use the WireGuard device; it registers its own EC identity. */
+    private void startMasqueEngine() {
+        busy = true;
+        render();
+        log("准备 MASQUE 设备…");
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Masque.Account account = Masque.Account.fromJson(prefs().getString(KEY_MASQUE, ""));
+                    if (account == null) {
+                        log("注册 MASQUE 设备（EC P-256）…");
+                        account = Masque.register();
+                        prefs().edit().putString(KEY_MASQUE, account.toJson()).apply();
+                    } else {
+                        log("复用 MASQUE 设备 " + account.ipv4);
+                    }
+                    final String yaml = MihomoConfig.buildMasque(account, Masque.DEFAULT_SERVER, Masque.DEFAULT_PORT);
+                    ui.post(new Runnable() {
+                        public void run() {
+                            try {
+                                MihomoVpnService.start(MainActivity.this, yaml);
+                                log("mihomo(MASQUE) 启动中…");
+                                scheduleEngineCheck();
+                            } catch (Exception e) {
+                                fail(e);
+                            }
+                        }
+                    });
+                } catch (final Exception e) {
+                    fail(e);
+                }
+            }
+        }, "mccx-masque").start();
+    }
+
+    private void scheduleEngineCheck() {
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                busy = false;
+                if (MihomoVpnService.running) {
+                    log("mihomo 已接管隧道");
+                    String tail = MihomoVpnService.recentLog();
+                    if (!tail.isEmpty()) {
+                        log("—— 内核输出 ——");
+                        log(tail);
+                    }
+                    startMihomoCheck();
+                } else {
+                    log("mihomo 未启动：" + MihomoVpnService.lastLog);
+                    String engineLog = MihomoVpnService.recentLog();
+                    if (!engineLog.isEmpty()) {
+                        log("—— 内核输出 ——");
+                        log(engineLog);
+                    }
+                }
+                render();
+            }
+        }, 3000);
+    }
     /**
      * Proves the tunnel carries traffic: mihomo fetches a URL through the proxy
      * and reports the delay. "接管" alone only means the fd arrived.
@@ -615,6 +683,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     try {
                         int delay = MihomoApi.delay("warp", 5000);
                         log("mihomo 隧道可用，出口延迟 " + delay + " ms");
+                        ui.post(new Runnable() { public void run() { connectionReady = true; render(); } });
                         return;
                     } catch (Exception e) {
                         lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
@@ -636,37 +705,63 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         // this point; the user asked for "off", not "try again".
         stopToken++;
         userDown = true;
+        connectionReady = false;
         busy = true;
         render();
-        if (MihomoVpnService.running) {
-            log("断开 mihomo…");
-            MihomoVpnService.stop(this);
-            busy = false;
-            exitInfo = "";
-            ui.postDelayed(new Runnable() {
-                public void run() {
-                    log(MihomoVpnService.running ? "mihomo 仍在运行" : "已断开");
-                    render();
-                }
-            }, 1200);
-            return;
+
+        // Stop everything, not just "ask the library nicely": a leftover engine
+        // or a system always-on VPN is what made the tunnel come back by itself.
+        try {
+            if (MihomoVpnService.running) {
+                MihomoVpnService.stop(this);
+            }
+        } catch (Exception ignored) {
         }
-        log("断开隧道…");
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                String alwaysOn = "无";
+                try {
+                    String app = Settings.Secure.getString(getContentResolver(), "always_on_vpn_app");
+                    if (app != null && !app.isEmpty()) {
+                        alwaysOn = app;
+                    }
+                } catch (Exception ignored) {
+                }
+                if (!"无".equals(alwaysOn)) {
+                    log("系统「始终开启的 VPN」= " + alwaysOn + "，它会在断开后自动重连");
+                }
+                if (MihomoVpnService.running) {
+                    log("引擎仍在运行，再次停止");
+                    MihomoVpnService.stop(MainActivity.this);
+                }
+                render();
+            }
+        }, 1500);
         new Thread(new Runnable() {
             public void run() {
                 try {
                     TunnelManager.down();
-                    ui.post(new Runnable() {
-                        public void run() {
-                            busy = false;
-                            exitInfo = "";
-                            log("已断开");
-                            render();
-                        }
-                    });
+                } catch (IllegalStateException ignored) {
+                    // mihomo-only session: the engine never attached to the WG backend.
                 } catch (final Exception e) {
                     fail(e);
+                    return;
                 }
+                try {
+                    // Belt and braces: make the WG service go away even if the
+                    // backend thought the tunnel was already down.
+                    stopService(new Intent(MainActivity.this,
+                            com.wireguard.android.backend.GoBackend.VpnService.class));
+                } catch (Exception ignored) {
+                }
+                ui.post(new Runnable() {
+                    public void run() {
+                        busy = false;
+                        exitInfo = "";
+                        log("已断开");
+                        render();
+                    }
+                });
             }
         }, "xehn-disconnect").start();
     }
@@ -718,6 +813,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     }
                     if (last.handshakeMs > 0) {
                         log("握手成功（端口 " + PORTS[portPlan[portAttempt]] + "）");
+                        ui.post(new Runnable() { public void run() { connectionReady = true; render(); } });
                         prefs().edit().putInt(KEY_PORT, portPlan[portAttempt]).apply();
                         startSelfCheck();
                         return;
@@ -856,7 +952,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         String configText = pendingConfig;
         pendingConfig = null;
         if (resultCode == RESULT_OK && configText != null) {
-            launch(pendingMihomo, configText, pendingResult);
+            launch(pendingEngine, configText, pendingResult);
         } else {
             busy = false;
             log("已取消 VPN 授权");
@@ -1122,6 +1218,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
+
+
+
 
 
 

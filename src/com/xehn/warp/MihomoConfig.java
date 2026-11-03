@@ -16,14 +16,7 @@ public final class MihomoConfig {
     private MihomoConfig() {
     }
 
-    /**
-     * @param host   endpoint IP or hostname
-     * @param port   endpoint port
-     * @param awg    true renders the AmneziaWG junk-packet options
-     * @param bypass true routes Chinese destinations direct (rule provider free)
-     */
-    public static String build(Warp.Account account, String host, int port, boolean awg, boolean bypass) {
-        StringBuilder b = new StringBuilder();
+    private static void appendBase(StringBuilder b) {
         b.append("# MccX · mihomo profile\n");
         b.append("mixed-port: ").append(MIXED_PORT).append('\n');
         b.append("allow-lan: false\n");
@@ -51,6 +44,48 @@ public final class MihomoConfig {
         b.append("  dns-hijack:\n");
         b.append("    - any:53\n");
         b.append("  mtu: 1280\n");
+    }
+
+    /** MASQUE profile: same shell, an EC-keyed masque outbound instead of wireguard. */
+    public static String buildMasque(Masque.Account account, String host, int port) {
+        StringBuilder b = new StringBuilder();
+        appendBase(b);
+        b.append("proxies:\n");
+        b.append("  - name: warp\n");
+        b.append("    type: masque\n");
+        b.append("    server: ").append(host).append('\n');
+        b.append("    port: ").append(port).append('\n');
+        b.append("    sni: ").append(Masque.SNI).append('\n');
+        b.append("    private-key: ").append(account.privateKey).append('\n');
+        b.append("    public-key: ").append(account.peerPublicKey).append('\n');
+        b.append("    ip: ").append(account.ipv4).append('\n');
+        if (account.ipv6 != null && !account.ipv6.isEmpty()) {
+            b.append("    ipv6: ").append(account.ipv6).append('\n');
+        }
+        b.append("    udp: true\n");
+        b.append("    mtu: 1280\n");
+        b.append("    congestion-controller: bbr\n");
+        b.append("    ip-stack:\n");
+        b.append("      mode: gvisor\n");
+        b.append("    handshake-timeout: 5\n");
+        b.append("proxy-groups:\n");
+        b.append("  - name: PROXY\n");
+        b.append("    type: select\n");
+        b.append("    proxies:\n");
+        b.append("      - warp\n");
+        b.append("rules:\n");
+        b.append("  - MATCH,PROXY\n");
+        return b.toString();
+    }
+    /**
+     * @param host   endpoint IP or hostname
+     * @param port   endpoint port
+     * @param awg    true renders the AmneziaWG junk-packet options
+     * @param bypass true routes Chinese destinations direct (rule provider free)
+     */
+    public static String build(Warp.Account account, String host, int port, boolean awg, boolean bypass) {
+        StringBuilder b = new StringBuilder();
+        appendBase(b);
 
         b.append("proxies:\n");
         b.append("  - name: warp\n");
@@ -103,4 +138,5 @@ public final class MihomoConfig {
         return b.toString();
     }
 }
+
 

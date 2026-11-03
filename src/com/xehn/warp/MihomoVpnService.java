@@ -212,8 +212,19 @@ public final class MihomoVpnService extends android.net.VpnService {
     private void stopTunnel() {
         running = false;
         if (core != null) {
-            core.destroy();
+            // destroy() only signals the launcher; the launcher is what kills
+            // mihomo, so give it a moment and then make sure nothing survives.
+            final Process dying = core;
             core = null;
+            dying.destroy();
+            new Thread(new Runnable() {
+                public void run() {
+                    sleep(900);
+                    if (dying.isAlive()) {
+                        dying.destroyForcibly();
+                    }
+                }
+            }, "mihomo-kill").start();
         }
         if (tun != null) {
             try {
@@ -259,4 +270,5 @@ public final class MihomoVpnService extends android.net.VpnService {
         context.startService(new Intent(context, MihomoVpnService.class).setAction(ACTION_STOP));
     }
 }
+
 

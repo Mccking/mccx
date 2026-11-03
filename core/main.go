@@ -8,15 +8,22 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"syscall"
 )
 
 func main() {
+	// If the app dies, take the engine with it: an orphaned mihomo keeps the
+	// TUN fd and the DNS port, and the next connect fails with
+	// "listen udp 0.0.0.0:1053: bind: address already in use".
+	_, _, _ = syscall.Syscall6(syscall.SYS_PRCTL, 1 /* PR_SET_PDEATHSIG */, uintptr(syscall.SIGTERM), 0, 0, 0, 0)
+
 	mihomo := flag.String("mihomo", "", "path to the mihomo binary")
 	config := flag.String("config", "", "path to config.yaml")
 	home := flag.String("home", "", "mihomo data directory")
@@ -34,6 +41,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mccx-core: receive fd:", err)
 		os.Exit(1)
 	}
+	killLeftoverEngines(*mihomo)
+
 	tun := os.NewFile(uintptr(fd), "tun")
 	defer tun.Close()
 	fmt.Println("mccx-core: tun fd received, starting mihomo")
@@ -53,6 +62,9 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("mccx-core: mihomo pid", cmd.Process.Pid)
+	defer func() {
+		_ = cmd.Process.Kill()
+	}()
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -120,4 +132,30 @@ func receiveFd(name string) (int, error) {
 		}
 	}
 	return -1, fmt.Errorf("SCM_RIGHTS carried no descriptors")
+}
+
+// killLeftoverEngines reaps engines left behind by a previous run of this app.
+// Only processes of our own UID can be signalled, and the launcher itself is
+// excluded by its own command line.
+func killLeftoverEngines(path string) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		cmdline, err := os.ReadFile("/proc/" + entry.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(cmdline, []byte("libmihomo.so")) && !bytes.Contains(cmdline, []byte("libmccxcore.so")) {
+			if err := syscall.Kill(pid, syscall.SIGKILL); err == nil {
+				fmt.Println("mccx-core: killed leftover engine", pid)
+			}
+		}
+	}
 }

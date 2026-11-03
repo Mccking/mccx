@@ -438,6 +438,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     busy = false;
                     if (MihomoVpnService.running) {
                         log("mihomo 已接管隧道");
+                        String tail = MihomoVpnService.recentLog();
+                        if (!tail.isEmpty()) {
+                            log("—— 内核输出 ——");
+                            log(tail);
+                        }
+                        startMihomoCheck();
                     } else {
                         log("mihomo 未启动：" + MihomoVpnService.lastLog);
                         String engineLog = MihomoVpnService.recentLog();
@@ -452,6 +458,34 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         } catch (Exception e) {
             fail(e);
         }
+    }
+
+    /**
+     * Proves the tunnel carries traffic: mihomo fetches a URL through the proxy
+     * and reports the delay. "接管" alone only means the fd arrived.
+     */
+    private void startMihomoCheck() {
+        new Thread(new Runnable() {
+            public void run() {
+                String lastError = "启动器未响应";
+                for (int i = 0; i < 6; i++) {
+                    try {
+                        int delay = MihomoApi.delay("warp", 5000);
+                        log("mihomo 隧道可用，出口延迟 " + delay + " ms");
+                        return;
+                    } catch (Exception e) {
+                        lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    }
+                    sleep(1500);
+                }
+                log("mihomo 隧道不通：" + lastError);
+                String tail = MihomoVpnService.recentLog();
+                if (!tail.isEmpty()) {
+                    log("—— 内核输出 ——");
+                    log(tail);
+                }
+            }
+        }, "mihomo-check").start();
     }
 
     private void startDisconnect() {
@@ -934,6 +968,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
 
 
 

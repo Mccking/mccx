@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.graphics.Typeface;
 import android.net.VpnService;
 import android.os.Bundle;
@@ -55,6 +56,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private final StringBuilder logLines = new StringBuilder();
 
     private TextView statusView;
+    private TextView statusDot;
     private TextView detailView;
     private TextView logView;
     private Button connectButton;
@@ -123,50 +125,123 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
     // ------------------------------------------------------------------ ui
 
-    private View buildUi() {
-        int pad = dp(22);
+    // ------------------------------------------------------------- design
 
+    private static final int C_BG = 0xFFF1F5F9;
+    private static final int C_CARD = 0xFFFFFFFF;
+    private static final int C_BORDER = 0xFFE2E8F0;
+    private static final int C_TEXT = 0xFF0F172A;
+    private static final int C_MUTED = 0xFF64748B;
+    private static final int C_ACCENT = 0xFF2563EB;
+    private static final int C_OK = 0xFF15803D;
+    private static final int C_WARN = 0xFFB45309;
+    private static final int C_DANGER = 0xFFB91C1C;
+
+    private View buildUi() {
         ScrollView root = new ScrollView(this);
+        root.setBackgroundColor(C_BG);
+        root.setFillViewport(true);
+
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        column.setPadding(pad, pad, pad, pad);
+        column.setPadding(dp(16), dp(20), dp(16), dp(24));
         root.addView(column, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        column.addView(buildHeader());
+        column.addView(buildConnectCard());
+        column.addView(buildSettingsCard());
+        column.addView(buildLogCard());
+        column.addView(buildActionGrid());
+
+        TextView footer = new TextView(this);
+        footer.setText("引擎基线 xehn@" + Warp.shortCommit() + " · 仅学习交流，禁止售卖");
+        footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        footer.setTextColor(C_MUTED);
+        footer.setGravity(android.view.Gravity.CENTER);
+        footer.setPadding(0, dp(6), 0, 0);
+        column.addView(footer);
+
+        return root;
+    }
+
+    private View buildHeader() {
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(4), 0, dp(4), dp(16));
+
         TextView title = new TextView(this);
         title.setText("MccX");
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        column.addView(title);
+        title.setTextColor(C_TEXT);
+        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("WARP 客户端 · 内置 WireGuard 内核 · 一键全局");
-        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        subtitle.setTextColor(Color.GRAY);
-        subtitle.setPadding(0, dp(2), 0, dp(24));
-        column.addView(subtitle);
+        TextView version = new TextView(this);
+        version.setText("v" + appVersionName());
+        version.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        version.setTextColor(C_MUTED);
+        header.addView(version);
+        return header;
+    }
+
+    private View buildConnectCard() {
+        LinearLayout card = card();
+
+        LinearLayout stateRow = new LinearLayout(this);
+        stateRow.setOrientation(LinearLayout.HORIZONTAL);
+        stateRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+        statusDot = new TextView(this);
+        statusDot.setText("●");
+        statusDot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        stateRow.addView(statusDot);
 
         statusView = new TextView(this);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         statusView.setTypeface(Typeface.DEFAULT_BOLD);
-        column.addView(statusView);
+        statusView.setPadding(dp(8), 0, 0, 0);
+        stateRow.addView(statusView, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(stateRow);
 
         detailView = new TextView(this);
-        detailView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        detailView.setTextColor(Color.GRAY);
-        detailView.setPadding(0, dp(6), 0, dp(20));
-        column.addView(detailView);
+        detailView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        detailView.setTextColor(C_MUTED);
+        detailView.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams detailLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        detailLp.topMargin = dp(6);
+        card.addView(detailView, detailLp);
 
-        LinearLayout portRow = new LinearLayout(this);
-        portRow.setOrientation(LinearLayout.HORIZONTAL);
-        portRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        connectButton = new Button(this);
+        connectButton.setAllCaps(false);
+        connectButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        connectButton.setTypeface(Typeface.DEFAULT_BOLD);
+        connectButton.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                onConnectClicked();
+            }
+        });
+        LinearLayout.LayoutParams buttonLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        buttonLp.topMargin = dp(16);
+        card.addView(connectButton, buttonLp);
+        return card;
+    }
 
-        TextView portLabel = new TextView(this);
-        portLabel.setText("端点端口");
-        portLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        portLabel.setTextColor(Color.DKGRAY);
-        portLabel.setPadding(0, 0, dp(12), 0);
-        portRow.addView(portLabel);
+    private View buildSettingsCard() {
+        LinearLayout card = card();
+        card.addView(cardTitle("设置"));
+
+        engineSpinner = new Spinner(this);
+        ArrayAdapter<String> engines = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item);
+        engines.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        engines.add("内置 WireGuard");
+        engines.add("mihomo（实验）");
+        engineSpinner.setAdapter(engines);
+        card.addView(settingsRow("隧道引擎", engineSpinner));
+        card.addView(divider());
 
         portSpinner = new Spinner(this);
         ArrayAdapter<String> ports = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item);
@@ -176,143 +251,211 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
         portSpinner.setAdapter(ports);
         portSpinner.setSelection(prefs().getInt(KEY_PORT, 2));  // 1701 by default
-        portRow.addView(portSpinner, new LinearLayout.LayoutParams(dp(110), dp(44)));
-        column.addView(portRow);
+        card.addView(settingsRow("端点端口", portSpinner));
+        return card;
+    }
 
-        LinearLayout engineRow = new LinearLayout(this);
-        engineRow.setOrientation(LinearLayout.HORIZONTAL);
-        engineRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        engineRow.setPadding(0, dp(8), 0, 0);
+    private View buildLogCard() {
+        LinearLayout card = card();
 
-        TextView engineLabel = new TextView(this);
-        engineLabel.setText("隧道引擎");
-        engineLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        engineLabel.setTextColor(Color.DKGRAY);
-        engineLabel.setPadding(0, 0, dp(12), 0);
-        engineRow.addView(engineLabel);
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView title = cardTitle("运行日志");
+        title.setPadding(0, 0, 0, 0);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        engineSpinner = new Spinner(this);
-        ArrayAdapter<String> engines = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item);
-        engines.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        engines.add("内置 WireGuard");
-        engines.add("mihomo（实验）");
-        engineSpinner.setAdapter(engines);
-        engineRow.addView(engineSpinner, new LinearLayout.LayoutParams(dp(180), dp(44)));
-        column.addView(engineRow);
-
-        connectButton = new Button(this);
-        connectButton.setAllCaps(false);
-        connectButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        connectButton.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                onConnectClicked();
-            }
-        });
-        LinearLayout.LayoutParams buttonLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(56));
-        buttonLp.setMargins(0, dp(12), 0, 0);
-        column.addView(connectButton, buttonLp);
-
-        TextView logTitle = new TextView(this);
-        logTitle.setText("运行日志");
-        logTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        logTitle.setTextColor(Color.DKGRAY);
-        logTitle.setPadding(0, dp(22), 0, dp(6));
-        column.addView(logTitle);
-
-        logView = new TextView(this);
-        logView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        logView.setTypeface(Typeface.MONOSPACE);
-        logView.setTextColor(Color.DKGRAY);
-        logView.setBackgroundColor(Color.rgb(246, 246, 246));
-        logView.setPadding(dp(10), dp(10), dp(10), dp(10));
-        logView.setTextIsSelectable(true);
-        ScrollView logScroll = new ScrollView(this);
-        logScroll.addView(logView, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        column.addView(logScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(200)));
-
-        LinearLayout logActions = new LinearLayout(this);
-        logActions.setOrientation(LinearLayout.HORIZONTAL);
-        logActions.setPadding(0, dp(6), 0, 0);
-
-        Button retest = new Button(this);
-        retest.setText("重新自检");
-        retest.setAllCaps(false);
-        retest.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        retest.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                if (TunnelManager.state() == Tunnel.State.UP) {
-                    startSelfCheck();
-                } else {
-                    toast("请先连接");
-                }
-            }
-        });
-        logActions.addView(retest);
-
-        Button probe = new Button(this);
-        probe.setText("测试内核");
-        probe.setAllCaps(false);
-        probe.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        probe.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                probeMihomo();
-            }
-        });
-        logActions.addView(probe);
-
-        Button copyLog = new Button(this);
-        copyLog.setText("复制日志");
-        copyLog.setAllCaps(false);
-        copyLog.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        copyLog.setOnClickListener(new View.OnClickListener() {
+        TextView copy = new TextView(this);
+        copy.setText("复制");
+        copy.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        copy.setTextColor(C_ACCENT);
+        copy.setPadding(dp(12), dp(4), dp(4), dp(4));
+        copy.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 copyLog();
             }
         });
-        logActions.addView(copyLog);
+        head.addView(copy);
+        card.addView(head);
 
-        Button update = new Button(this);
-        update.setText("检查更新");
-        update.setAllCaps(false);
-        update.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        update.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                checkUpdate();
-            }
-        });
-        logActions.addView(update);
-        column.addView(logActions);
-
-        TextView footnote = new TextView(this);
-        footnote.setText("全局流量经 Cloudflare WARP 出口。\n引擎逻辑源自 github.com/hezhanleiok/xehn（仅学习交流，禁止售卖）。");
-        footnote.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        footnote.setTextColor(Color.GRAY);
-        footnote.setPadding(0, dp(16), 0, 0);
-        column.addView(footnote);
-
-        return root;
+        logView = new TextView(this);
+        logView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        logView.setTypeface(Typeface.MONOSPACE);
+        logView.setTextColor(0xFF334155);
+        logView.setLineSpacing(dp(2), 1f);
+        logView.setTextIsSelectable(true);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(logView, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams logLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(168));
+        logLp.topMargin = dp(10);
+        card.addView(scroll, logLp);
+        return card;
     }
 
+    private View buildActionGrid() {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+
+        grid.addView(actionRow(
+                actionButton("重新自检", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        if (TunnelManager.state() == Tunnel.State.UP) {
+                            startSelfCheck();
+                        } else {
+                            toast("请先连接");
+                        }
+                    }
+                }),
+                actionButton("测试内核", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        probeMihomo();
+                    }
+                })));
+
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.topMargin = dp(8);
+
+        LinearLayout second = actionRow(
+                actionButton("检查更新", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        checkUpdate();
+                    }
+                }),
+                actionButton("重置设备", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        resetDevice();
+                    }
+                }));
+        grid.addView(second, rowLp);
+        return grid;
+    }
+
+    private LinearLayout actionRow(Button left, Button right) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        lp.setMargins(0, 0, dp(6), 0);
+        row.addView(left, lp);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        rp.setMargins(dp(6), 0, 0, 0);
+        row.addView(right, rp);
+        return row;
+    }
+
+    private LinearLayout card() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(C_CARD);
+        bg.setCornerRadius(dp(18));
+        bg.setStroke(dp(1), C_BORDER);
+        card.setBackground(bg);
+        card.setElevation(dp(1));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(14);
+        card.setLayoutParams(lp);
+        return card;
+    }
+
+    private TextView cardTitle(String text) {
+        TextView title = new TextView(this);
+        title.setText(text);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        title.setTextColor(C_MUTED);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding(0, 0, 0, dp(4));
+        return title;
+    }
+
+    private View settingsRow(String label, View control) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(8), 0, dp(8));
+
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        name.setTextColor(C_TEXT);
+        row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(control, new LinearLayout.LayoutParams(dp(152), dp(40)));
+        return row;
+    }
+
+    private View divider() {
+        View line = new View(this);
+        line.setBackgroundColor(C_BORDER);
+        line.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        return line;
+    }
+
+    private Button actionButton(String text, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setAllCaps(false);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        button.setTextColor(C_TEXT);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(C_CARD);
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(1), C_BORDER);
+        button.setBackground(bg);
+        button.setOnClickListener(listener);
+        return button;
+    }
+
+    private void styleConnectButton(boolean up, boolean connecting) {
+        int color;
+        if (connecting) {
+            color = C_WARN;
+        } else if (up) {
+            color = C_DANGER;
+        } else {
+            color = C_ACCENT;
+        }
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(26));
+        connectButton.setBackground(bg);
+        connectButton.setTextColor(0xFFFFFFFF);
+    }
+
+    private String appVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
     private void render() {
         boolean up = MihomoVpnService.running || TunnelManager.state() == Tunnel.State.UP;
         if (busy) {
             statusView.setText("连接中…");
-            statusView.setTextColor(Color.rgb(230, 140, 20));
+            statusView.setTextColor(C_WARN);
+            statusDot.setTextColor(C_WARN);
             connectButton.setText("请稍候");
             connectButton.setEnabled(false);
+            styleConnectButton(false, true);
         } else if (up) {
             statusView.setText("已连接");
-            statusView.setTextColor(Color.rgb(20, 140, 60));
+            statusView.setTextColor(C_OK);
+            statusDot.setTextColor(C_OK);
             connectButton.setText("断开");
             connectButton.setEnabled(true);
+            styleConnectButton(true, false);
         } else {
             statusView.setText("未连接");
-            statusView.setTextColor(Color.rgb(120, 120, 120));
+            statusView.setTextColor(C_MUTED);
+            statusDot.setTextColor(C_MUTED);
             connectButton.setText("连接");
             connectButton.setEnabled(true);
+            styleConnectButton(false, false);
         }
 
         StringBuilder detail = new StringBuilder();
@@ -929,6 +1072,17 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         });
     }
 
+    /** Forgets the registered WARP device so the next connect starts fresh. */
+    private void resetDevice() {
+        prefs().edit()
+                .remove(KEY_ACCOUNT)
+                .apply();
+        logLines.setLength(0);
+        log("已清除本机 WARP 设备，下次连接会重新注册");
+        toast("已重置");
+        render();
+    }
+
     private void copyLog() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         clipboard.setPrimaryClip(ClipData.newPlainText("xehn-log", logLines.toString()));
@@ -968,6 +1122,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
 
 
 

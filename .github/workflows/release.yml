@@ -55,18 +55,11 @@ jobs:
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
             -o ../libs/arm64-v8a/libmccxcore.so .
 
-      - name: Fetch mihomo engine (optional)
-        run: |
-          mkdir -p libs/arm64-v8a
-          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-android-arm64-v8-${MIHOMO_VER}.gz"
-          if curl -fsSL "$url" -o /tmp/mihomo.gz; then
-            gunzip -c /tmp/mihomo.gz > libs/arm64-v8a/libmihomo.so
-            chmod +x libs/arm64-v8a/libmihomo.so
-            echo "mihomo $(stat -c%s libs/arm64-v8a/libmihomo.so) bytes"
-          else
-            echo "mihomo 未取到，本次构建不含内核（探测按钮会提示未打包）"
-          fi
-
+      # The stock mihomo Android binary aborts TUN start with
+      # "build android rules: read packages list: ... permission denied",
+      # so the engine is built here with tools/patch_mihomo.py applied.
+      - name: Build mihomo engine (patched)
+        run: bash tools/build_mihomo.sh
       - name: Sync upstream constants
         id: sync
         shell: pwsh
@@ -108,6 +101,7 @@ jobs:
           files: |
             dist/*.apk
             dist/update.json
+
 
 
 

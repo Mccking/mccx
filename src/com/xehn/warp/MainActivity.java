@@ -97,6 +97,11 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        applyPalette();
+        try {
+            getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(C_BG));
+        } catch (Exception ignored) {
+        }
         setContentView(buildUi());
         // The backend is constructed on the connect worker: loading libwg-go.so
         // on the UI thread would make the first frame stutter.
@@ -124,6 +129,13 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     @Override
+    public void onConfigurationChanged(android.content.res.Configuration config) {
+        super.onConfigurationChanged(config);
+        // Rebuild with the other palette instead of mutating every view.
+        recreate();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         render();
@@ -133,15 +145,47 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
     // ------------------------------------------------------------- design
 
-    private static final int C_BG = 0xFFF1F5F9;
-    private static final int C_CARD = 0xFFFFFFFF;
-    private static final int C_BORDER = 0xFFE2E8F0;
-    private static final int C_TEXT = 0xFF0F172A;
-    private static final int C_MUTED = 0xFF64748B;
-    private static final int C_ACCENT = 0xFF2563EB;
-    private static final int C_OK = 0xFF15803D;
-    private static final int C_WARN = 0xFFB45309;
-    private static final int C_DANGER = 0xFFB91C1C;
+    // Palette is per-instance so the screen can follow the system light/dark
+    // setting without pulling in AppCompat.
+    private int C_BG;
+    private int C_CARD;
+    private int C_BORDER;
+    private int C_TEXT;
+    private int C_MUTED;
+    private int C_ACCENT;
+    private int C_OK;
+    private int C_WARN;
+    private int C_DANGER;
+    private int C_LOG;
+
+    private void applyPalette() {
+        boolean dark = (getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        if (dark) {
+            C_BG = 0xFF0B1120;
+            C_CARD = 0xFF111827;
+            C_BORDER = 0xFF1F2937;
+            C_TEXT = 0xFFE5E7EB;
+            C_MUTED = 0xFF94A3B8;
+            C_ACCENT = 0xFF60A5FA;
+            C_OK = 0xFF4ADE80;
+            C_WARN = 0xFFFBBF24;
+            C_DANGER = 0xFFF87171;
+            C_LOG = 0xFFCBD5E1;
+        } else {
+            C_BG = 0xFFF1F5F9;
+            C_CARD = 0xFFFFFFFF;
+            C_BORDER = 0xFFE2E8F0;
+            C_TEXT = 0xFF0F172A;
+            C_MUTED = 0xFF64748B;
+            C_ACCENT = 0xFF2563EB;
+            C_OK = 0xFF15803D;
+            C_WARN = 0xFFB45309;
+            C_DANGER = 0xFFB91C1C;
+            C_LOG = 0xFF334155;
+        }
+    }
 
     private View buildUi() {
         ScrollView root = new ScrollView(this);
@@ -159,14 +203,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         column.addView(buildSettingsCard());
         column.addView(buildLogCard());
         column.addView(buildActionGrid());
-
-        TextView footer = new TextView(this);
-        footer.setText("引擎基线 xehn@" + Warp.shortCommit() + " · 仅学习交流，禁止售卖");
-        footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        footer.setTextColor(C_MUTED);
-        footer.setGravity(android.view.Gravity.CENTER);
-        footer.setPadding(0, dp(6), 0, 0);
-        column.addView(footer);
 
         return root;
     }
@@ -288,7 +324,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         logView = new TextView(this);
         logView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         logView.setTypeface(Typeface.MONOSPACE);
-        logView.setTextColor(0xFF334155);
+        logView.setTextColor(C_LOG);
         logView.setLineSpacing(dp(2), 1f);
         logView.setTextIsSelectable(true);
         ScrollView scroll = new ScrollView(this);
@@ -1238,6 +1274,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
 
 
 

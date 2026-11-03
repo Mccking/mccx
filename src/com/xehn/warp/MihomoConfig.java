@@ -56,6 +56,9 @@ public final class MihomoConfig {
         b.append("    server: ").append(host).append('\n');
         b.append("    port: ").append(port).append('\n');
         b.append("    sni: ").append(Masque.SNI).append('\n');
+        // H2 (TCP 443), not the HTTP/3 default: on networks that drop UDP this
+        // is the only transport MASQUE can actually use.
+        b.append("    network: h2\n");
         b.append("    private-key: ").append(account.privateKey).append('\n');
         b.append("    public-key: ").append(account.peerPublicKey).append('\n');
         b.append("    ip: ").append(account.ipv4).append('\n');
@@ -138,5 +141,6 @@ public final class MihomoConfig {
         return b.toString();
     }
 }
+
 
 

@@ -84,6 +84,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private volatile boolean userDown;
     /** True once the tunnel actually carries traffic (handshake or engine probe). */
     private volatile boolean connectionReady;
+    /** The engine started but its probe never succeeded; the UI must say so. */
+    private volatile boolean connectionFailed;
     private int recloseCount;
 
     private final Warp.Log logger = new Warp.Log() {
@@ -447,6 +449,13 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             connectButton.setText("请稍候");
             connectButton.setEnabled(false);
             styleConnectButton(false, true);
+        } else if (up && connectionFailed) {
+            statusView.setText("连接异常");
+            statusView.setTextColor(C_DANGER);
+            statusDot.setTextColor(C_DANGER);
+            connectButton.setText("断开");
+            connectButton.setEnabled(true);
+            styleConnectButton(true, false);
         } else if (up && !connectionReady) {
             // The TUN exists but no handshake yet: saying "connected" here is
             // what made the app look connected while nothing loaded.
@@ -497,7 +506,11 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         if (busy) {
             return;
         }
-        if (TunnelManager.state() == Tunnel.State.UP) {
+        // Must use the same definition of "up" the status line uses: in the
+        // engine modes the tunnel is not registered in the WireGuard backend,
+        // so checking TunnelManager alone made "断开" start a new connection.
+        boolean up = MihomoVpnService.running || TunnelManager.state() == Tunnel.State.UP;
+        if (up) {
             startDisconnect();
         } else {
             startConnect();
@@ -527,6 +540,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
     private void startConnect() {
         userDown = false;
+        connectionFailed = false;
         recloseCount = 0;
         busy = true;
         exitInfo = "";
@@ -690,7 +704,13 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     }
                     sleep(1500);
                 }
+                connectionFailed = true;
                 log("mihomo 隧道不通：" + lastError);
+                ui.post(new Runnable() {
+                    public void run() {
+                        render();
+                    }
+                });
                 String tail = MihomoVpnService.recentLog();
                 if (!tail.isEmpty()) {
                     log("—— 内核输出 ——");
@@ -1218,6 +1238,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
 
 
 

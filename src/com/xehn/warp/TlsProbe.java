@@ -29,9 +29,30 @@ public final class TlsProbe {
     private TlsProbe() {
     }
 
+    /** The same endpoint often times out once and answers on the next try. */
+    private static final int ATTEMPTS = 3;
+
     public static String run(String host, int port, String sni) {
         StringBuilder report = new StringBuilder();
         report.append(host).append(':').append(port).append(" sni=").append(sni).append('\n');
+        String lastError = "";
+        for (int attempt = 1; attempt <= ATTEMPTS; attempt++) {
+            String result = attempt(host, port, sni);
+            if (!result.startsWith("失败")) {
+                report.append(result);
+                report.append("（第 ").append(attempt).append(" 次尝试成功）\n");
+                return report.toString();
+            }
+            lastError = result;
+            report.append("第 ").append(attempt).append(" 次：").append(result);
+        }
+        report.append(lastError);
+        report.append("（三次都失败；TCP 成功但 TLS 失败 = 大概率按 SNI 阻断，TCP 就失败 = 地址/端口不可达）\n");
+        return report.toString();
+    }
+
+    private static String attempt(String host, int port, String sni) {
+        StringBuilder report = new StringBuilder();
         long started = System.nanoTime();
         Socket raw = new Socket();
         try {
@@ -57,9 +78,8 @@ public final class TlsProbe {
             }
             ssl.close();
         } catch (Exception e) {
-            report.append("失败：").append(e.getClass().getSimpleName())
-                    .append(' ').append(e.getMessage() == null ? "" : e.getMessage()).append('\n');
-            report.append("（TCP 成功但 TLS 失败 = 大概率按 SNI 阻断；TCP 就失败 = 地址/端口不可达）\n");
+            return "失败：" + e.getClass().getSimpleName() + " "
+                    + (e.getMessage() == null ? "" : e.getMessage());
         } finally {
             try {
                 raw.close();
@@ -67,5 +87,5 @@ public final class TlsProbe {
             }
         }
         return report.toString();
-    }
-}
+    }}
+

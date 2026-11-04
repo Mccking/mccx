@@ -48,7 +48,9 @@ public final class Masque {
             "2606:4700:103::1", "2606:4700:103::2", "2606:4700:104::1", "2606:4700:104::2",
     };
     private static final int[] PORTS = {443, 1701, 500, 4500, 4443, 8443, 8095};
-    private static final int PROBE_TIMEOUT_MS = 1500;
+    private static final int PROBE_TIMEOUT_MS = 3000;
+    /** The same endpoint answers on one attempt and times out on the next. */
+    private static final int PROBE_ATTEMPTS = 3;
     private static final int PROBE_THREADS = 16;
 
     public interface Log {
@@ -75,54 +77,67 @@ public final class Masque {
      * 443 first, then the ports this device's network is known to pass.
      */
     public static Endpoint pickEndpoint(Log log) {
-        List<Endpoint> candidates = new ArrayList<Endpoint>();
+        // Port-major rounds: try 443 everywhere first, then the ports this
+        // network is known to pass. Each host gets PROBE_ATTEMPTS tries, because
+        // a single failed connect here is mostly noise, not a dead endpoint.
         for (int port : PORTS) {
+            final List<Endpoint> round = new ArrayList<Endpoint>();
             for (String host : HOSTS_V4) {
-                candidates.add(new Endpoint(host, port));
+                round.add(new Endpoint(host, port));
             }
-        }
-        for (int port : PORTS) {
             for (String host : HOSTS_V6) {
-                candidates.add(new Endpoint(host, port));
+                round.add(new Endpoint(host, port));
             }
-        }
 
-        ExecutorService pool = Executors.newFixedThreadPool(PROBE_THREADS);
-        List<Future<Boolean>> results = new ArrayList<Future<Boolean>>();
-        try {
-            for (final Endpoint candidate : candidates) {
-                results.add(pool.submit(new Callable<Boolean>() {
-                    public Boolean call() {
-                        return reachable(candidate);
-                    }
-                }));
-            }
-            pool.shutdown();
-            pool.awaitTermination(PROBE_TIMEOUT_MS * 3L, TimeUnit.MILLISECONDS);
-            for (int i = 0; i < results.size(); i++) {
-                Future<Boolean> future = results.get(i);
-                if (!future.isDone() || future.isCancelled()) {
-                    continue;
-                }
-                try {
-                    if (Boolean.TRUE.equals(future.get())) {
-                        Endpoint found = candidates.get(i);
-                        if (log != null) {
-                            log.log("MASQUE 端点可达：" + found.label());
+            ExecutorService pool = Executors.newFixedThreadPool(PROBE_THREADS);
+            List<Future<Boolean>> results = new ArrayList<Future<Boolean>>();
+            try {
+                for (final Endpoint candidate : round) {
+                    results.add(pool.submit(new Callable<Boolean>() {
+                        public Boolean call() {
+                            return reachableWithRetries(candidate);
                         }
-                        return found;
-                    }
-                } catch (Exception ignored) {
+                    }));
                 }
+                pool.shutdown();
+                pool.awaitTermination(PROBE_TIMEOUT_MS * PROBE_ATTEMPTS + 2000L, TimeUnit.MILLISECONDS);
+                for (int i = 0; i < results.size(); i++) {
+                    Future<Boolean> future = results.get(i);
+                    if (!future.isDone() || future.isCancelled()) {
+                        continue;
+                    }
+                    try {
+                        if (Boolean.TRUE.equals(future.get())) {
+                            Endpoint found = round.get(i);
+                            if (log != null) {
+                                log.log("MASQUE 端点可达：" + found.label());
+                            }
+                            return found;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } finally {
+                pool.shutdownNow();
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } finally {
-            pool.shutdownNow();
+            if (log != null) {
+                log.log("端口 " + port + " 上暂无可达端点，继续下一个端口");
+            }
         }
         return null;
     }
 
+    public static boolean reachableWithRetries(Endpoint endpoint) {
+        for (int attempt = 0; attempt < PROBE_ATTEMPTS; attempt++) {
+            if (reachable(endpoint)) {
+                return true;
+            }
+        }
+        return false;
+    }
     /** Quick TCP reachability check; TLS is left to mihomo. */
     public static boolean reachable(Endpoint endpoint) {
         Socket socket = new Socket();
@@ -350,6 +365,7 @@ public final class Masque {
         return format.format(new Date());
     }
 }
+
 
 
 

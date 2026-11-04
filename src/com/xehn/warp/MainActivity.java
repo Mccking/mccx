@@ -87,6 +87,18 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private volatile boolean connectionReady;
     /** The engine started but its probe never succeeded; the UI must say so. */
     private volatile boolean connectionFailed;
+
+    // Watchdog: the tunnel can die silently (network change, engine exit), so a
+    // cheap health check runs every few seconds and reconnects at most 3 times
+    // in 5 minutes before giving up.
+    private volatile boolean watchdogRunning;
+    private Thread watchdogThread;
+    private int reconnectCount;
+    private long reconnectWindowStart;
+    private long lastRxBytes;
+    private int lastEngine;
+    private String lastWgConfig = "";
+    private String lastMihomoYaml = "";
     private int recloseCount;
 
     private final Warp.Log logger = new Warp.Log() {
@@ -99,6 +111,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         applyPalette();
+        LogStore.init(this);
         try {
             getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(C_BG));
         } catch (Exception ignored) {
@@ -308,6 +321,18 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         TextView title = cardTitle("运行日志");
         title.setPadding(0, 0, 0, 0);
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView share = new TextView(this);
+        share.setText("分享");
+        share.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        share.setTextColor(C_ACCENT);
+        share.setPadding(dp(12), dp(4), dp(4), dp(4));
+        share.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                shareLog();
+            }
+        });
+        head.addView(share);
 
         TextView copy = new TextView(this);
         copy.setText("复制");
@@ -635,7 +660,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * a wireguard outbound, 2 = mihomo with a MASQUE outbound (EC keys, port 443).
      */
     private void launch(int engine, String configText, Warp.Result result) {
+        lastEngine = engine;
         if (engine == 0) {
+            lastWgConfig = configText;
             applyUp(configText);
             return;
         }
@@ -647,7 +674,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             int split = result.endpoint.lastIndexOf(':');
             String host = result.endpoint.substring(0, split);
             int port = Integer.parseInt(result.endpoint.substring(split + 1));
-            startMihomoEngine(MihomoConfig.build(result.account, host, port, false, false));
+            lastMihomoYaml = MihomoConfig.build(result.account, host, port, false, false);
+            startMihomoEngine(lastMihomoYaml);
         } catch (Exception e) {
             fail(e);
         }
@@ -720,6 +748,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     ui.post(new Runnable() {
                         public void run() {
                             try {
+                                lastEngine = 2;
+                                lastMihomoYaml = yaml;
                                 MihomoVpnService.start(MainActivity.this, yaml);
                                 log("mihomo(MASQUE) 启动中…");
                                 scheduleEngineCheck();
@@ -759,6 +789,103 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             }
         }, 3000);
     }
+    private void markReady() {
+        connectionReady = true;
+        connectionFailed = false;
+        startWatchdog();
+    }
+
+    private void startWatchdog() {
+        stopWatchdog();
+        watchdogRunning = true;
+        lastRxBytes = 0;
+        watchdogThread = new Thread(new Runnable() {
+            public void run() {
+                int failures = 0;
+                int tick = 0;
+                while (watchdogRunning) {
+                    sleep(5000);
+                    if (!watchdogRunning || userDown) {
+                        return;
+                    }
+                    tick++;
+                    boolean healthy = checkHealthy(tick);
+                    failures = healthy ? 0 : failures + 1;
+                    if (failures >= 3) {
+                        failures = 0;
+                        if (!reconnectTunnel()) {
+                            log("看门狗：多次重连失败，停止自动重连");
+                            watchdogRunning = false;
+                            return;
+                        }
+                    }
+                }
+            }
+        }, "mccx-watchdog");
+        watchdogThread.start();
+    }
+
+    /**
+     * Liveness check. It probes through the tunnel instead of trusting counters:
+     * an idle-but-working tunnel has a stale handshake and no traffic growth, and
+     * must not be torn down.
+     */
+    private boolean checkHealthy(int tick) {
+        if (tick % 3 != 0) {
+            return true;   // probe roughly every 15 seconds, not every tick
+        }
+        if (MihomoVpnService.running) {
+            try {
+                MihomoApi.delay("warp", 3000);
+                return true;
+            } catch (Exception e) {
+                log("看门狗：引擎探测失败 " + (e.getMessage() == null ? "" : e.getMessage()));
+                return false;
+            }
+        }
+        if (TunnelManager.state() != Tunnel.State.UP) {
+            return false;
+        }
+        SelfCheck.Info info = SelfCheck.run();
+        if (!info.error.isEmpty()) {
+            log("看门狗：出口探测失败 " + info.error);
+            return false;
+        }
+        return true;
+    }
+    private boolean reconnectTunnel() {
+        long now = System.currentTimeMillis();
+        if (reconnectWindowStart == 0 || now - reconnectWindowStart > 5 * 60 * 1000L) {
+            reconnectWindowStart = now;
+            reconnectCount = 0;
+        }
+        if (reconnectCount >= 3) {
+            return false;
+        }
+        reconnectCount++;
+        log("看门狗：出口无响应，第 " + reconnectCount + " 次重连…");
+        watchdogRunning = false;
+        ui.post(new Runnable() {
+            public void run() {
+                connectionReady = false;
+                connectionFailed = false;
+                render();
+            }
+        });
+        if (lastEngine == 0 && !lastWgConfig.isEmpty()) {
+            applyUp(lastWgConfig);
+        } else if (!lastMihomoYaml.isEmpty()) {
+            startMihomoEngine(lastMihomoYaml);
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    private void stopWatchdog() {
+        watchdogRunning = false;
+        watchdogThread = null;
+    }
     /**
      * Proves the tunnel carries traffic: mihomo fetches a URL through the proxy
      * and reports the delay. "接管" alone only means the fd arrived.
@@ -771,7 +898,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     try {
                         int delay = MihomoApi.delay("warp", 5000);
                         log("mihomo 隧道可用，出口延迟 " + delay + " ms");
-                        ui.post(new Runnable() { public void run() { connectionReady = true; render(); } });
+                        ui.post(new Runnable() { public void run() { markReady(); render(); } });
                         return;
                     } catch (Exception e) {
                         lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
@@ -800,6 +927,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         stopToken++;
         userDown = true;
         connectionReady = false;
+        connectionFailed = false;
+        stopWatchdog();
         busy = true;
         render();
 
@@ -907,7 +1036,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     }
                     if (last.handshakeMs > 0) {
                         log("握手成功（端口 " + PORTS[portPlan[portAttempt]] + "）");
-                        ui.post(new Runnable() { public void run() { connectionReady = true; render(); } });
+                        ui.post(new Runnable() { public void run() { markReady(); render(); } });
                         prefs().edit().putInt(KEY_PORT, portPlan[portAttempt]).apply();
                         startSelfCheck();
                         return;
@@ -1027,7 +1156,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     public void run() {
                         exitInfo = result.describe();
                         log(exitInfo);
-                        if (result.error.isEmpty() && !result.throughWarp()) {
+                        if (!result.error.isEmpty()) {
+                            // Exit verification is the gate, not the handshake:
+                            // "no answer through the tunnel" means unusable.
+                            connectionFailed = true;
+                            log("出口验证失败：隧道没有真正承载流量");
+                        } else if (!result.throughWarp()) {
                             log("警告：warp=off，流量可能没有从 WARP 出口出去");
                         }
                         render();
@@ -1104,6 +1238,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     private void appendLog(final String line) {
+        LogStore.append(line);
         ui.post(new Runnable() {
             public void run() {
                 logLines.append(line).append('\n');
@@ -1277,6 +1412,22 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         render();
     }
 
+    /** Shares the in-memory view plus the on-disk file path. */
+    private void shareLog() {
+        String text = logLines.toString();
+        if (text.isEmpty()) {
+            toast("还没有日志");
+            return;
+        }
+        java.io.File file = LogStore.file();
+        String note = file == null ? "" : "\n\n完整日志：" + file.getAbsolutePath();
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_SUBJECT, "MccX log");
+        intent.putExtra(Intent.EXTRA_TEXT, text + note);
+        startActivity(Intent.createChooser(intent, "分享日志"));
+    }
+
     private void copyLog() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         clipboard.setPrimaryClip(ClipData.newPlainText("xehn-log", logLines.toString()));
@@ -1316,6 +1467,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
+
+
+
 
 
 

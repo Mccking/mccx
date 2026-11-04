@@ -1210,6 +1210,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
                 report.append("退出码 ").append(finished ? String.valueOf(process.exitValue()) : "超时").append('\n');
                 report.append("输出 ").append(out.toString().trim());
+                report.append("\n\n—— MASQUE 端点 TLS 探测（对照）——\n");
+                report.append(TlsProbe.run(Masque.DEFAULT_SERVER, Masque.DEFAULT_PORT, Masque.SNI));
+                report.append('\n');
+                report.append(TlsProbe.run(Masque.DEFAULT_SERVER, Masque.DEFAULT_PORT, "cloudflare.com"));
                 postProbe(report.toString());
             }
         }, "xehn-probe").start();
@@ -1274,6 +1278,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
 
 
 

@@ -51,6 +51,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private static final String KEY_ACCOUNT = "account";
     private static final String KEY_PORT = "port_index";
     private static final String KEY_MASQUE = "masque_account";
+    private static final String KEY_MASQUE_ENDPOINT = "masque_endpoint";
     private static final int[] PORTS = {2408, 500, 1701, 443};
     private static final int LOG_LINES = 12;
 
@@ -662,6 +663,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
     }
 
+    private final Masque.Log masqueLogger = new Masque.Log() {
+        public void log(String line) {
+            appendLog(line);
+        }
+    };
+
     /** MASQUE does not use the WireGuard device; it registers its own EC identity. */
     private void startMasqueEngine() {
         busy = true;
@@ -678,7 +685,38 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     } else {
                         log("复用 MASQUE 设备 " + account.ipv4);
                     }
-                    final String yaml = MihomoConfig.buildMasque(account, Masque.DEFAULT_SERVER, Masque.DEFAULT_PORT);
+                    log("探测 MASQUE 端点（TCP）…");
+                    Masque.Endpoint endpoint = null;
+                    String cached = prefs().getString(KEY_MASQUE_ENDPOINT, "");
+                    if (!cached.isEmpty()) {
+                        try {
+                            int split = cached.lastIndexOf(':');
+                            Masque.Endpoint probe = new Masque.Endpoint(
+                                    cached.substring(0, split), Integer.parseInt(cached.substring(split + 1)));
+                            if (Masque.reachable(probe)) {
+                                endpoint = probe;
+                                log("复用端点 " + cached);
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (endpoint == null) {
+                        endpoint = Masque.pickEndpoint(masqueLogger);
+                    }
+                    if (endpoint == null) {
+                        connectionFailed = true;
+                        log("所有 MASQUE 端点都不可达：当前网络没有可用的 TCP 出口");
+                        ui.post(new Runnable() {
+                            public void run() {
+                                busy = false;
+                                render();
+                            }
+                        });
+                        return;
+                    }
+                    prefs().edit().putString(KEY_MASQUE_ENDPOINT, endpoint.label()).apply();
+
+                    final String yaml = MihomoConfig.buildMasque(account, endpoint.host, endpoint.port);
                     ui.post(new Runnable() {
                         public void run() {
                             try {
@@ -1278,6 +1316,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
 
 
 

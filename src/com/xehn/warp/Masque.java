@@ -1,6 +1,15 @@
 package com.xehn.warp;
 
 import org.json.JSONObject;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -29,6 +38,106 @@ public final class Masque {
     public static final String SNI = "consumer-masque.cloudflareclient.com";
     public static final String DEFAULT_SERVER = "162.159.198.2";
     public static final int DEFAULT_PORT = 443;
+
+    /** H2 endpoints are whole /24s; the same host answers on several ports. */
+    private static final String[] HOSTS_V4 = {
+            "162.159.198.1", "162.159.198.2", "162.159.198.3", "162.159.198.4",
+            "162.159.199.1", "162.159.199.2",
+    };
+    private static final String[] HOSTS_V6 = {
+            "2606:4700:103::1", "2606:4700:103::2", "2606:4700:104::1", "2606:4700:104::2",
+    };
+    private static final int[] PORTS = {443, 1701, 500, 4500, 4443, 8443, 8095};
+    private static final int PROBE_TIMEOUT_MS = 1500;
+    private static final int PROBE_THREADS = 16;
+
+    public interface Log {
+        void log(String line);
+    }
+
+    /** A reachable (host, port) pair for the H2 transport. */
+    public static final class Endpoint {
+        public final String host;
+        public final int port;
+
+        Endpoint(String host, int port) {
+            this.host = host;
+            this.port = port;
+        }
+
+        public String label() {
+            return host + ":" + port;
+        }
+    }
+
+    /**
+     * Finds an endpoint that answers on TCP. Order is the preference order:
+     * 443 first, then the ports this device's network is known to pass.
+     */
+    public static Endpoint pickEndpoint(Log log) {
+        List<Endpoint> candidates = new ArrayList<Endpoint>();
+        for (int port : PORTS) {
+            for (String host : HOSTS_V4) {
+                candidates.add(new Endpoint(host, port));
+            }
+        }
+        for (int port : PORTS) {
+            for (String host : HOSTS_V6) {
+                candidates.add(new Endpoint(host, port));
+            }
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(PROBE_THREADS);
+        List<Future<Boolean>> results = new ArrayList<Future<Boolean>>();
+        try {
+            for (final Endpoint candidate : candidates) {
+                results.add(pool.submit(new Callable<Boolean>() {
+                    public Boolean call() {
+                        return reachable(candidate);
+                    }
+                }));
+            }
+            pool.shutdown();
+            pool.awaitTermination(PROBE_TIMEOUT_MS * 3L, TimeUnit.MILLISECONDS);
+            for (int i = 0; i < results.size(); i++) {
+                Future<Boolean> future = results.get(i);
+                if (!future.isDone() || future.isCancelled()) {
+                    continue;
+                }
+                try {
+                    if (Boolean.TRUE.equals(future.get())) {
+                        Endpoint found = candidates.get(i);
+                        if (log != null) {
+                            log.log("MASQUE 端点可达：" + found.label());
+                        }
+                        return found;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            pool.shutdownNow();
+        }
+        return null;
+    }
+
+    /** Quick TCP reachability check; TLS is left to mihomo. */
+    public static boolean reachable(Endpoint endpoint) {
+        Socket socket = new Socket();
+        try {
+            socket.connect(new InetSocketAddress(endpoint.host, endpoint.port), PROBE_TIMEOUT_MS);
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            try {
+                socket.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
 
     private static final String REG_URL = "https://api.cloudflareclient.com/v0a4471/reg";
     private static final String USER_AGENT = "WARP for Android";
@@ -241,6 +350,7 @@ public final class Masque {
         return format.format(new Date());
     }
 }
+
 
 
 

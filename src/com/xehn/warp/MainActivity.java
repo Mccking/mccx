@@ -296,6 +296,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         engines.add("内置 WireGuard");
         engines.add("mihomo（实验）");
         engines.add("mihomo · MASQUE（实验）");
+        engines.add("上游引擎（实验）");
         engineSpinner.setAdapter(engines);
         card.addView(settingsRow("隧道引擎", engineSpinner));
         card.addView(divider());
@@ -503,7 +504,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
     }
     private void render() {
-        boolean up = MihomoVpnService.running || TunnelManager.state() == Tunnel.State.UP;
+        boolean up = MihomoVpnService.running || EngineService.running || TunnelManager.state() == Tunnel.State.UP;
         if (busy) {
             statusView.setText("连接中…");
             statusView.setTextColor(C_WARN);
@@ -571,7 +572,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         // Must use the same definition of "up" the status line uses: in the
         // engine modes the tunnel is not registered in the WireGuard backend,
         // so checking TunnelManager alone made "断开" start a new connection.
-        boolean up = MihomoVpnService.running || TunnelManager.state() == Tunnel.State.UP;
+        boolean up = MihomoVpnService.running || EngineService.running || TunnelManager.state() == Tunnel.State.UP;
         if (up) {
             startDisconnect();
         } else {
@@ -668,6 +669,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
         if (engine == 2) {
             startMasqueEngine();
+            return;
+        }
+        if (engine == 3) {
+            log("上游引擎启动中…");
+            EngineService.start(this, "wg");
+            scheduleEngineCheck();
             return;
         }
         try {
@@ -769,6 +776,19 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         ui.postDelayed(new Runnable() {
             public void run() {
                 busy = false;
+                if (lastEngine == 3) {
+                    log(EngineService.running ? "上游引擎已接管" : "上游引擎未启动：" + EngineService.lastLog);
+                    String tail = EngineService.recentLog();
+                    if (!tail.isEmpty()) {
+                        log("—— 引擎输出 ——");
+                        log(tail);
+                    }
+                    if (EngineService.running) {
+                        markReady();
+                    }
+                    render();
+                    return;
+                }
                 if (MihomoVpnService.running) {
                     log("mihomo 已接管隧道");
                     String tail = MihomoVpnService.recentLog();
@@ -937,6 +957,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         try {
             if (MihomoVpnService.running) {
                 MihomoVpnService.stop(this);
+            }
+            if (EngineService.running) {
+                EngineService.stop(this);
             }
         } catch (Exception ignored) {
         }
@@ -1467,6 +1490,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
 
 
 

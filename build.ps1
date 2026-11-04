@@ -20,13 +20,23 @@ if (-not (Test-Path "$jni\arm64-v8a")) {
 Remove-Item $build\gen, $build\classes, $build\dex -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $build, $dist, "$build\gen", "$build\classes", "$build\dex" | Out-Null
 
+# Upstream XEHN engine (gomobile AAR): classes.jar for javac/d8, jni .so for the APK.
+$engineJar = ''
+$engineJni = ''
+if (Test-Path "$lib\engine.aar") {
+    Write-Host '== extract engine.aar =='
+    Expand-Archive "$lib\engine.aar" -DestinationPath "$build\engine-aar" -Force
+    $engineJar = "$build\engine-aar\classes.jar"
+    $engineJni = "$build\engine-aar\jni"
+}
+
 $deps = @(
     "$lib\tunnel.jar",
     "$lib\collection.jar",
     "$lib\annotation.jar",
     "$lib\okhttp.jar",
     "$lib\okio.jar"
-)
+) + $(if ($engineJar) { @($engineJar) } else { @() })
 $depPath = ($deps -join ';')
 
 Write-Host '== aapt2 compile =='
@@ -38,7 +48,7 @@ Write-Host '== aapt2 link =='
     --manifest "$root\AndroidManifest.xml" `
     --java "$build\gen" `
     --min-sdk-version 24 --target-sdk-version 33 `
-    --version-code 1025 --version-name 3.18 `
+    --version-code 1026 --version-name 3.19 `
     "$build\res.zip"
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
@@ -78,6 +88,15 @@ try {
                 $out.Write($bytes, 0, $bytes.Length)
             } finally { $out.Dispose() }
         }
+        if ($engineJni -and (Test-Path "$engineJni\$abi\libgojni.so")) {
+            $so = Get-Item "$engineJni\$abi\libgojni.so"
+            $e = $zip.CreateEntry("lib/$abi/libgojni.so", [System.IO.Compression.CompressionLevel]::Optimal)
+            $out = $e.Open()
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($so.FullName)
+                $out.Write($bytes, 0, $bytes.Length)
+            } finally { $out.Dispose() }
+        }
         # Locally built engine binaries (mihomo, launcher) live outside the AAR.
         $extra = "$root\libs\$abi"
         if (Test-Path $extra) {
@@ -108,7 +127,7 @@ if (-not (Test-Path $ks)) {
         -dname "CN=XEHN WARP VPN, O=XEHN, C=CN"
     if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
 }
-$out = "$dist\mccx-3.18.apk"
+$out = "$dist\mccx-3.19.apk"
 & "$bt\apksigner.bat" sign --ks $ks --ks-pass pass:xehn-apk --key-pass pass:xehn-apk `
     --ks-key-alias xehn --v1-signing-enabled true --v2-signing-enabled true `
     --out $out "$build\aligned.apk"
@@ -118,6 +137,8 @@ Write-Host '== verify =='
 & "$bt\apksigner.bat" verify -v $out | Select-Object -First 4
 & "$bt\aapt2.exe" dump badging $out | Select-String 'package:|sdkVersion|targetSdkVersion|native-code|launchable-activity' | ForEach-Object { $_.Line }
 Get-Item $out | Select-Object FullName, @{n='MB'; e={ [math]::Round($_.Length / 1MB, 2) }}
+
+
 
 
 

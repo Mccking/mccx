@@ -37,6 +37,17 @@
             </intent-filter>
         </service>
 
+        <!-- Upstream XEHN engine: in-process Go library (engine.aar), same
+             VpnService contract as the upstream app. -->
+        <service
+            android:name="com.xehn.warp.EngineService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
         <!-- Installer session verdicts (self-update). -->
         <receiver
             android:name="com.xehn.warp.InstallReceiver"
@@ -54,6 +65,7 @@
         </service>
     </application>
 </manifest>
+
 
 
 

@@ -21,6 +21,17 @@ BUILD="$ROOT/build"
 DIST="$ROOT/dist"
 LIB="$ROOT/lib"
 JNI="$BUILD/aar/jni"
+
+# Upstream XEHN engine (gomobile AAR): classes for dex, libgojni.so for the APK.
+ENGINE_JAR=""
+ENGINE_JNI=""
+if [ -f "$LIB/engine.aar" ]; then
+    rm -rf "$BUILD/engine-aar"
+    mkdir -p "$BUILD/engine-aar"
+    (cd "$BUILD/engine-aar" && unzip -oq "$LIB/engine.aar")
+    ENGINE_JAR="$BUILD/engine-aar/classes.jar"
+    ENGINE_JNI="$BUILD/engine-aar/jni"
+fi
 # A fresh clone has no extracted AAR: the WireGuard native libs live inside it.
 if [ ! -d "$JNI/arm64-v8a" ]; then
     mkdir -p "$BUILD/aar"
@@ -43,6 +54,7 @@ echo "== aapt2 =="
 echo "== javac =="
 find "$ROOT/src" "$BUILD/gen" -name '*.java' > "$BUILD/sources.txt"
 CP="$AJAR:$LIB/tunnel.jar:$LIB/collection.jar:$LIB/annotation.jar:$LIB/okhttp.jar:$LIB/okio.jar"
+if [ -n "$ENGINE_JAR" ]; then CP="$CP:$ENGINE_JAR"; fi
 "$JAVA_HOME/bin/javac" -encoding UTF-8 -source 8 -target 8 \
     -bootclasspath "$AJAR" -classpath "$CP" \
     -d "$BUILD/classes" "@$BUILD/sources.txt"
@@ -51,7 +63,7 @@ echo "== d8 =="
 (cd "$BUILD/classes" && "$JAVA_HOME/bin/jar" cf "$BUILD/classes.jar" .)
 "$BT/d8" --release --min-api 24 --lib "$AJAR" --output "$BUILD/dex" \
     "$BUILD/classes.jar" "$LIB/tunnel.jar" "$LIB/collection.jar" \
-    "$LIB/annotation.jar" "$LIB/okhttp.jar" "$LIB/okio.jar"
+    "$LIB/annotation.jar" "$LIB/okhttp.jar" "$LIB/okio.jar" ${ENGINE_JAR:+"$ENGINE_JAR"}
 test -f "$BUILD/dex/classes.dex"
 
 echo "== package =="
@@ -68,6 +80,9 @@ for abi in arm64-v8a armeabi-v7a; do
         cp "$EXTRA_LIBS/$abi"/*.so "$BUILD/stage/lib/$abi/" 2>/dev/null || true
     fi
 done
+if [ -n "$ENGINE_JNI" ] && [ -f "$ENGINE_JNI/arm64-v8a/libgojni.so" ]; then
+    cp "$ENGINE_JNI/arm64-v8a/libgojni.so" "$BUILD/stage/lib/arm64-v8a/"
+fi
 (cd "$BUILD/stage" && zip -qr app.apk classes.dex lib)
 
 echo "== zipalign =="
@@ -104,4 +119,5 @@ if [ -n "${APK_URL:-}" ]; then
 EOF
     echo "manifest $DIST/update.json"
 fi
+
 

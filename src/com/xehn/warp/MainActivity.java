@@ -566,7 +566,29 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
     private void render() {
         boolean up = MihomoVpnService.running || EngineService.running || TunnelManager.state() == Tunnel.State.UP;
-        if (busy) {
+        boolean upstream = lastEngine == 3 && EngineService.running;
+        if (!busy && upstream && EngineService.connected()) {
+            statusView.setText("已连接");
+            statusView.setTextColor(C_OK);
+            statusDot.setTextColor(C_OK);
+            connectButton.setText("断开");
+            connectButton.setEnabled(true);
+            styleConnectButton(true, false);
+        } else if (!busy && upstream && "error".equals(EngineService.state)) {
+            statusView.setText("连接异常");
+            statusView.setTextColor(C_DANGER);
+            statusDot.setTextColor(C_DANGER);
+            connectButton.setText("断开");
+            connectButton.setEnabled(true);
+            styleConnectButton(true, false);
+        } else if (!busy && upstream) {
+            statusView.setText("连接中…");
+            statusView.setTextColor(C_WARN);
+            statusDot.setTextColor(C_WARN);
+            connectButton.setText("断开");
+            connectButton.setEnabled(true);
+            styleConnectButton(true, true);
+        } else if (busy) {
             statusView.setText("连接中…");
             statusView.setTextColor(C_WARN);
             statusDot.setTextColor(C_WARN);
@@ -606,7 +628,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
 
         StringBuilder detail = new StringBuilder();
-        if (up || (!lastEndpoint.isEmpty() && !busy)) {
+        if (upstream) {
+            detail.append(upstreamDetail());
+        } else if (up || (!lastEndpoint.isEmpty() && !busy)) {
             if (!lastEndpoint.isEmpty()) {
                 detail.append(lastEndpoint);
             }
@@ -620,6 +644,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             detail.append("点击连接：自动注册 WARP、优选节点、建立隧道");
         }
         detailView.setText(detail.toString());
+        scheduleUiTick(upstream);
 
         logView.setText(logLines.toString());
     }
@@ -884,6 +909,75 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 render();
             }
         }, 3000);
+    }
+    /** Keeps the exit/throughput line live while the upstream engine runs. */
+    private void scheduleUiTick(boolean active) {
+        ui.removeCallbacks(uiTick);
+        if (active) {
+            ui.postDelayed(uiTick, 1000);
+        }
+    }
+
+    private final Runnable uiTick = new Runnable() {
+        public void run() {
+            render();
+        }
+    };
+
+    private String upstreamDetail() {
+        StringBuilder b = new StringBuilder();
+        String proto = EngineService.proto.isEmpty() ? "wg" : EngineService.proto;
+        if (!EngineService.exitIP.isEmpty()) {
+            b.append("出口 ");
+            if (!EngineService.country.isEmpty()) {
+                b.append(EngineService.country).append(' ');
+            }
+            b.append(EngineService.exitIP);
+            b.append("  ·  ").append(proto);
+            if (EngineService.latencyMs > 0) {
+                b.append("  ·  ").append(EngineService.latencyMs).append(" ms");
+            }
+        } else if (!EngineService.endpoint.isEmpty()) {
+            b.append("端点 ").append(EngineService.endpoint).append("  ·  ").append(proto);
+        } else {
+            b.append("上游引擎  ·  ").append(proto);
+        }
+        if (!EngineService.egress.isEmpty()) {
+            b.append("  ·  出口 ").append(EngineService.egress);
+        }
+        if (EngineService.connected()) {
+            b.append('\n').append("↑ ").append(speed(EngineService.upBps))
+                    .append("   ↓ ").append(speed(EngineService.downBps))
+                    .append("   ·   共 ").append(bytes(EngineService.upBytes + EngineService.downBytes))
+                    .append("   ·   ").append(clock(EngineService.uptimeMs));
+        }
+        return b.toString();
+    }
+
+    private static String speed(long bps) {
+        if (bps < 1024) {
+            return bps + " B/s";
+        }
+        if (bps < 1024 * 1024) {
+            return (bps / 1024) + " KB/s";
+        }
+        return String.format(java.util.Locale.US, "%.1f MB/s", bps / 1048576.0);
+    }
+
+    private static String bytes(long value) {
+        if (value < 1024) {
+            return value + " B";
+        }
+        if (value < 1024 * 1024) {
+            return (value / 1024) + " KB";
+        }
+        return String.format(java.util.Locale.US, "%.1f MB", value / 1048576.0);
+    }
+
+    private static String clock(long ms) {
+        long seconds = ms / 1000;
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d",
+                seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     }
     private void markReady() {
         connectionReady = true;
@@ -1566,6 +1660,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
 
 
 

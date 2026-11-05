@@ -48,7 +48,7 @@ Write-Host '== aapt2 link =='
     --manifest "$root\AndroidManifest.xml" `
     --java "$build\gen" `
     --min-sdk-version 24 --target-sdk-version 33 `
-    --version-code 1027 --version-name 3.20 `
+    --version-code 1028 --version-name 3.21 `
     "$build\res.zip"
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
@@ -127,7 +127,7 @@ if (-not (Test-Path $ks)) {
         -dname "CN=XEHN WARP VPN, O=XEHN, C=CN"
     if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
 }
-$out = "$dist\mccx-3.20.apk"
+$out = "$dist\mccx-3.21.apk"
 & "$bt\apksigner.bat" sign --ks $ks --ks-pass pass:xehn-apk --key-pass pass:xehn-apk `
     --ks-key-alias xehn --v1-signing-enabled true --v2-signing-enabled true `
     --out $out "$build\aligned.apk"
@@ -137,6 +137,7 @@ Write-Host '== verify =='
 & "$bt\apksigner.bat" verify -v $out | Select-Object -First 4
 & "$bt\aapt2.exe" dump badging $out | Select-String 'package:|sdkVersion|targetSdkVersion|native-code|launchable-activity' | ForEach-Object { $_.Line }
 Get-Item $out | Select-Object FullName, @{n='MB'; e={ [math]::Round($_.Length / 1MB, 2) }}
+
 
 
 

@@ -37,6 +37,22 @@ public final class EngineService extends VpnService {
     public static volatile boolean running;
     public static volatile String state = "";
     public static volatile String lastLog = "";
+    public static volatile String proto = "";
+    public static volatile String endpoint = "";
+    public static volatile String exitIP = "";
+    public static volatile String country = "";
+    public static volatile String message = "";
+    public static volatile String egress = "";
+    public static volatile long latencyMs = -1;
+    public static volatile long upBps;
+    public static volatile long downBps;
+    public static volatile long upBytes;
+    public static volatile long downBytes;
+    public static volatile long uptimeMs;
+
+    public static boolean connected() {
+        return "connected".equals(state);
+    }
 
     private static final ArrayDeque<String> RECENT = new ArrayDeque<String>();
 
@@ -199,16 +215,13 @@ public final class EngineService extends VpnService {
                         return;
                     }
                     try {
-                        String raw = engine.statusJSON();
-                        String current = parseState(raw);
-                        if (current != null && !current.equals(previous)) {
-                            previous = current;
-                            state = current;
-                            remember("状态：" + current);
-                            if ("connected".equals(current)) {
+                        applyStatus(engine.statusJSON());
+                        if (!state.equals(previous)) {
+                            previous = state;
+                            remember("状态：" + state
+                                    + (message.isEmpty() ? "" : "（" + message + "）"));
+                            if ("connected".equals(state)) {
                                 running = true;
-                            } else if ("error".equals(current)) {
-                                running = false;
                             }
                         }
                     } catch (Throwable ignored) {
@@ -219,6 +232,26 @@ public final class EngineService extends VpnService {
         poller.start();
     }
 
+    /** Mirrors the engine snapshot into the static fields the UI reads. */
+    private static void applyStatus(String json) {
+        try {
+            JSONObject o = new JSONObject(json);
+            state = o.optString("state", state);
+            proto = o.optString("proto", proto);
+            endpoint = o.optString("endpoint", endpoint);
+            exitIP = o.optString("exitIP", exitIP);
+            country = o.optString("country", country);
+            message = o.optString("message", "");
+            egress = o.optString("egress", "");
+            latencyMs = o.optLong("latencyMS", latencyMs);
+            upBps = o.optLong("upBps", upBps);
+            downBps = o.optLong("downBps", downBps);
+            upBytes = o.optLong("upBytes", upBytes);
+            downBytes = o.optLong("downBytes", downBytes);
+            uptimeMs = o.optLong("uptimeMS", uptimeMs);
+        } catch (Throwable ignored) {
+        }
+    }
     private static String parseState(String json) {
         try {
             JSONObject o = new JSONObject(json);
@@ -270,5 +303,6 @@ public final class EngineService extends VpnService {
                 .setAction(ACTION_STOP));
     }
 }
+
 
 

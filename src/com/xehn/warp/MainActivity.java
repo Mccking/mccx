@@ -52,6 +52,18 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private static final String KEY_PORT = "port_index";
     private static final String KEY_MASQUE = "masque_account";
     private static final String KEY_MASQUE_ENDPOINT = "masque_endpoint";
+    private static final String KEY_ENGINE = "engine_index";
+    private static final String KEY_PROTO = "upstream_proto";
+    private static final String KEY_POLICY = "route_policy";
+
+    /** Upstream engine protocols, mirrors the desktop flags. */
+    private static final String[][] UPSTREAM_PROTOS = {
+            {"wg", "WireGuard"},
+            {"awg", "AmneziaWG"},
+            {"masque", "MASQUE"},
+            {"masque-h2", "MASQUE (HTTP/2)"},
+            {"wwarp", "WARP-in-WARP"},
+    };
     private static final int[] PORTS = {2408, 500, 1701, 443};
     private static final int LOG_LINES = 12;
 
@@ -64,6 +76,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private TextView logView;
     private Button connectButton;
     private Spinner portSpinner;
+    private Spinner protoSpinner;
+    private Spinner policySpinner;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
     private int pendingEngine;
@@ -117,6 +131,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         } catch (Exception ignored) {
         }
         setContentView(buildUi());
+        engineSpinner.setSelection(prefs().getInt(KEY_ENGINE, 0));
         // The backend is constructed on the connect worker: loading libwg-go.so
         // on the UI thread would make the first frame stutter.
         render();
@@ -290,29 +305,75 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         LinearLayout card = card();
         card.addView(cardTitle("设置"));
 
+        card.addView(sectionLabel("连接"));
         engineSpinner = new Spinner(this);
-        ArrayAdapter<String> engines = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item);
-        engines.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        engines.add("内置 WireGuard");
-        engines.add("mihomo（实验）");
-        engines.add("mihomo · MASQUE（实验）");
-        engines.add("上游引擎（实验）");
-        engineSpinner.setAdapter(engines);
+        engineSpinner.setAdapter(spinnerAdapter(new String[]{
+                "内置 WireGuard", "mihomo（实验）", "mihomo · MASQUE（实验）", "上游引擎（实验）"
+        }));
+        engineSpinner.setSelection(prefs().getInt(KEY_ENGINE, 0));
         card.addView(settingsRow("隧道引擎", engineSpinner));
         card.addView(divider());
 
-        portSpinner = new Spinner(this);
-        ArrayAdapter<String> ports = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item);
-        ports.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        for (int p : PORTS) {
-            ports.add(String.valueOf(p));
+        protoSpinner = new Spinner(this);
+        String[] protoLabels = new String[UPSTREAM_PROTOS.length];
+        for (int i = 0; i < UPSTREAM_PROTOS.length; i++) {
+            protoLabels[i] = UPSTREAM_PROTOS[i][1];
         }
-        portSpinner.setAdapter(ports);
-        portSpinner.setSelection(prefs().getInt(KEY_PORT, 2));  // 1701 by default
+        protoSpinner.setAdapter(spinnerAdapter(protoLabels));
+        protoSpinner.setSelection(prefs().getInt(KEY_PROTO, 0));
+        card.addView(settingsRow("上游协议", protoSpinner));
+        card.addView(divider());
+
+        portSpinner = new Spinner(this);
+        String[] portLabels = new String[PORTS.length];
+        for (int i = 0; i < PORTS.length; i++) {
+            portLabels[i] = String.valueOf(PORTS[i]);
+        }
+        portSpinner.setAdapter(spinnerAdapter(portLabels));
+        portSpinner.setSelection(prefs().getInt(KEY_PORT, 2));
         card.addView(settingsRow("端点端口", portSpinner));
+
+        card.addView(sectionLabel("路由"));
+        policySpinner = new Spinner(this);
+        policySpinner.setAdapter(spinnerAdapter(new String[]{"全局", "绕过大陆"}));
+        policySpinner.setSelection(prefs().getInt(KEY_POLICY, 0));
+        card.addView(settingsRow("分流", policySpinner));
         return card;
     }
 
+    /** Spinners live outside our palette, so their text has to be painted. */
+    private ArrayAdapter<String> spinnerAdapter(final String[] items) {
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_item, items) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                view.setTextColor(C_TEXT);
+                view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+                return view;
+            }
+
+            @Override
+            public View getDropDownView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getDropDownView(position, convertView, parent);
+                view.setTextColor(C_TEXT);
+                view.setBackgroundColor(C_CARD);
+                view.setPadding(dp(14), dp(10), dp(14), dp(10));
+                return view;
+            }
+        };
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        return adapter;
+    }
+
+    private TextView sectionLabel(String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        label.setTextColor(C_MUTED);
+        label.setPadding(0, dp(10), 0, dp(2));
+        return label;
+    }
     private View buildLogCard() {
         LinearLayout card = card();
 
@@ -616,6 +677,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         final int portIndex = Math.max(0, portSpinner.getSelectedItemPosition());
         final int port = PORTS[portIndex];
         final int engine = engineSpinner.getSelectedItemPosition();
+        prefs().edit().putInt(KEY_ENGINE, engine).apply();
         portPlan = orderPorts(portIndex);
         portAttempt = 0;
 
@@ -660,6 +722,20 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * Starts the engine the user picked: 0 = built-in WireGuard, 1 = mihomo with
      * a wireguard outbound, 2 = mihomo with a MASQUE outbound (EC keys, port 443).
      */
+    private String upstreamProto() {
+        int index = protoSpinner == null ? prefs().getInt(KEY_PROTO, 0) : protoSpinner.getSelectedItemPosition();
+        if (index < 0 || index >= UPSTREAM_PROTOS.length) {
+            index = 0;
+        }
+        prefs().edit().putInt(KEY_PROTO, index).apply();
+        return UPSTREAM_PROTOS[index][0];
+    }
+
+    private String upstreamPolicy() {
+        int index = policySpinner == null ? prefs().getInt(KEY_POLICY, 0) : policySpinner.getSelectedItemPosition();
+        prefs().edit().putInt(KEY_POLICY, index).apply();
+        return index == 1 ? "bypass-cn" : "global";
+    }
     private void launch(int engine, String configText, Warp.Result result) {
         lastEngine = engine;
         if (engine == 0) {
@@ -673,7 +749,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
         if (engine == 3) {
             log("上游引擎启动中…");
-            EngineService.start(this, "wg");
+            EngineService.start(this, upstreamProto(), upstreamPolicy());
             scheduleEngineCheck();
             return;
         }
@@ -1490,6 +1566,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
 
 
 

@@ -29,6 +29,7 @@ public final class EngineService extends VpnService {
     public static final String ACTION_START = "com.xehn.warp.ENGINE_START";
     public static final String ACTION_STOP = "com.xehn.warp.ENGINE_STOP";
     public static final String EXTRA_PROTO = "proto";
+    public static final String EXTRA_POLICY = "policy";
 
     private static final int MTU = 1280;
     private static final long POLL_MS = 1000;
@@ -74,11 +75,13 @@ public final class EngineService extends VpnService {
             return START_NOT_STICKY;
         }
         String proto = intent.getStringExtra(EXTRA_PROTO);
-        startTunnel(proto == null || proto.isEmpty() ? "wg" : proto);
+        String policy = intent.getStringExtra(EXTRA_POLICY);
+        startTunnel(proto == null || proto.isEmpty() ? "wg" : proto,
+                policy == null || policy.isEmpty() ? "global" : policy);
         return START_NOT_STICKY;
     }
 
-    private void startTunnel(String proto) {
+    private void startTunnel(String proto, String policy) {
         try {
             File dir = new File(getFilesDir(), "engine");
             if (!dir.exists() && !dir.mkdirs()) {
@@ -103,7 +106,7 @@ public final class EngineService extends VpnService {
             builder.setSession("MccX");
             builder.setMtu(MTU);
             builder.addAddress("172.16.0.2", 32);
-            builder.addRoute("0.0.0.0", 0);
+            applyRoutes(builder, policy);
             builder.addDnsServer("1.1.1.1");
             builder.setBlocking(true);
             tun = builder.establish();
@@ -114,7 +117,9 @@ public final class EngineService extends VpnService {
             engine.setTunFD(tun.getFd());
             engine.setVPNState(true);
             remember("engine: " + engine.versionString() + "，协议 " + proto);
+            engine.setRules(policy, "");
             engine.connect(proto, "", false, false, MTU);
+            refreshCnRoutesIfStale(policy);
             running = true;
             startPoller();
         } catch (Throwable t) {
@@ -124,6 +129,62 @@ public final class EngineService extends VpnService {
         }
     }
 
+    /**
+     * Route policy. "bypass-cn" needs the mainland table the engine downloads;
+     * until that exists the only honest option is global with a note in the log.
+     */
+    private void applyRoutes(Builder builder, String policy) {
+        if (!"bypass-cn".equals(policy)) {
+            builder.addRoute("0.0.0.0", 0);
+            remember("分流：全局");
+            return;
+        }
+        java.util.List<int[]> cn = SplitRoute.loadCnRoutes(this);
+        if (cn.isEmpty()) {
+            builder.addRoute("0.0.0.0", 0);
+            remember("分流：大陆路由表未就绪，本次按全局（连上后会下载）");
+            return;
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            builder.addRoute("0.0.0.0", 0);
+            int excluded = 0;
+            for (int[] route : cn) {
+                try {
+                    builder.excludeRoute(new android.net.IpPrefix(
+                            java.net.InetAddress.getByAddress(SplitRoute.intToBytes(route[0])), route[1]));
+                    excluded++;
+                } catch (Throwable ignored) {
+                }
+            }
+            remember("分流：绕过大陆（全局 + 排除 " + excluded + " 个网段）");
+        } else {
+            java.util.List<int[]> gaps = SplitRoute.complementV4(cn);
+            for (int[] route : gaps) {
+                builder.addRoute(SplitRoute.intToIp(route[0]), route[1]);
+            }
+            remember("分流：绕过大陆（" + gaps.size() + " 条补集路由，API<33 无 excludeRoute）");
+        }
+    }
+
+    private void refreshCnRoutesIfStale(final String policy) {
+        if (!"bypass-cn".equals(policy) || SplitRoute.cacheFresh(this)) {
+            return;
+        }
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Engine_ current = engine;
+                    if (current == null) {
+                        return;
+                    }
+                    String info = current.refreshCNRoutes();
+                    remember("大陆路由表已更新：" + (info == null ? "" : info));
+                } catch (Throwable t) {
+                    remember("大陆路由表更新失败：" + t.getMessage());
+                }
+            }
+        }, "cn-routes").start();
+    }
     private void startPoller() {
         poller = new Thread(new Runnable() {
             public void run() {
@@ -196,10 +257,11 @@ public final class EngineService extends VpnService {
         super.onDestroy();
     }
 
-    public static void start(android.content.Context context, String proto) {
+    public static void start(android.content.Context context, String proto, String policy) {
         android.content.Intent intent = new android.content.Intent(context, EngineService.class)
                 .setAction(ACTION_START)
-                .putExtra(EXTRA_PROTO, proto);
+                .putExtra(EXTRA_PROTO, proto)
+                .putExtra(EXTRA_POLICY, policy);
         context.startService(intent);
     }
 
@@ -208,3 +270,5 @@ public final class EngineService extends VpnService {
                 .setAction(ACTION_STOP));
     }
 }
+
+

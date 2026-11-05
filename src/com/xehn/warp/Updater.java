@@ -38,6 +38,18 @@ public final class Updater {
      */
     public static final String MANIFEST_URL = "https://github.com/Mccking/mccx/releases/latest/download/update.json";
 
+    /**
+     * github.com is DNS-poisoned on some networks, so the manifest is tried
+     * through public read-only mirrors as well. The first that answers wins and
+     * the APK download reuses the same prefix.
+     */
+    private static final String[] MIRRORS = {
+            "",
+            "https://ghproxy.net/",
+            "https://gh-proxy.com/",
+            "https://hub.gitmirror.com/",
+    };
+
     public interface Log {
         void log(String line);
     }
@@ -49,6 +61,7 @@ public final class Updater {
         public String sha256 = "";
         public String notes = "";
         public String error = "";
+        public String mirror = "";
 
         public boolean isNewerThan(int current) {
             return error.isEmpty() && versionCode > current && !url.isEmpty();
@@ -86,29 +99,36 @@ public final class Updater {
             info.error = "未配置更新源";
             return info;
         }
-        Response response = null;
-        try {
-            Request request = new Request.Builder().url(MANIFEST_URL)
-                    .header("User-Agent", "mccx-updater")
-                    .build();
-            response = CLIENT.newCall(request).execute();
-            if (!response.isSuccessful() || response.body() == null) {
-                info.error = "HTTP " + response.code();
+        String lastError = "";
+        for (String mirror : MIRRORS) {
+            String url = mirror.isEmpty() ? MANIFEST_URL : mirror + MANIFEST_URL;
+            Response response = null;
+            try {
+                Request request = new Request.Builder().url(url)
+                        .header("User-Agent", "mccx-updater")
+                        .build();
+                response = CLIENT.newCall(request).execute();
+                if (!response.isSuccessful() || response.body() == null) {
+                    lastError = "HTTP " + response.code() + (mirror.isEmpty() ? "" : "（镜像 " + mirror + "）");
+                    continue;
+                }
+                JSONObject json = new JSONObject(response.body().string());
+                info.versionCode = json.optInt("versionCode", 0);
+                info.versionName = json.optString("versionName", "");
+                info.url = json.optString("url", "");
+                info.sha256 = json.optString("sha256", "");
+                info.notes = json.optString("notes", "");
+                info.mirror = mirror;
                 return info;
-            }
-            JSONObject json = new JSONObject(response.body().string());
-            info.versionCode = json.optInt("versionCode", 0);
-            info.versionName = json.optString("versionName", "");
-            info.url = json.optString("url", "");
-            info.sha256 = json.optString("sha256", "");
-            info.notes = json.optString("notes", "");
-        } catch (Exception e) {
-            info.error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-        } finally {
-            if (response != null) {
-                response.close();
+            } catch (Exception e) {
+                lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            } finally {
+                if (response != null) {
+                    response.close();
+                }
             }
         }
+        info.error = friendly(lastError);
         return info;
     }
 
@@ -119,7 +139,11 @@ public final class Updater {
         }
         File apk = new File(context.getCacheDir(), "update.apk");
         log.log("下载 " + info.versionName + "…");
-        download(info.url, apk);
+        String url = info.url;
+        if (!info.mirror.isEmpty() && url.startsWith("https://github.com/")) {
+            url = info.mirror + url;
+        }
+        download(url, apk);
         log.log("下载完成 " + (apk.length() / 1024 / 1024) + " MB");
 
         if (!info.sha256.isEmpty()) {
@@ -157,6 +181,22 @@ public final class Updater {
         }
 
         log.log("已交给系统安装器，请在弹窗里确认");
+    }
+
+    /** Turns a raw socket/DNS failure into something the user can act on. */
+    private static String friendly(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "网络不可用";
+        }
+        String lower = raw.toLowerCase(java.util.Locale.US);
+        if (lower.contains("resolve host") || lower.contains("unknownhost")
+                || lower.contains("no address associated")) {
+            return "无法解析 github.com：当前网络 DNS 被干扰，请先连接 VPN 再检查更新";
+        }
+        if (lower.contains("timed out") || lower.contains("timeout")) {
+            return "连接更新源超时，请稍后重试或先连接 VPN";
+        }
+        return raw;
     }
 
     private static void download(String url, File target) throws IOException {
@@ -197,4 +237,5 @@ public final class Updater {
         return hex.toString();
     }
 }
+
 

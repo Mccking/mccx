@@ -61,6 +61,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private static final String KEY_IPV6 = "ipv6_enabled";
     private static final String KEY_MTU = "mtu_index";
     private static final String KEY_RULES = "custom_rules";
+    private static final String KEY_EXIT_IDS = "exit_ids";
+    private static final String KEY_EXIT_LABEL = "exit_label";
+    private static final String KEY_EXIT_COUNTRY = "exit_country";
 
     /** Upstream engine protocols, mirrors the desktop flags. */
     private static final String[][] UPSTREAM_PROTOS = {
@@ -88,6 +91,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private Spinner mtuSpinner;
     private Switch ipv6Switch;
     private EditText rulesInput;
+    private TextView exitValue;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
     private int pendingEngine;
@@ -369,6 +373,19 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(settingsRow("分流", policySpinner));
         card.addView(divider());
 
+        exitValue = new TextView(this);
+        exitValue.setText(exitLabelText());
+        exitValue.setTextColor(C_ACCENT);
+        exitValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        exitValue.setPadding(0, dp(4), 0, dp(4));
+        exitValue.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showExitDialog();
+            }
+        });
+        card.addView(settingsRow("第二跳出口", exitValue));
+        card.addView(divider());
+
         rulesInput = new EditText(this);
         rulesInput.setText(prefs().getString(KEY_RULES, ""));
         rulesInput.setHint("proxy,1.2.3.0/24（每行一条）");
@@ -391,7 +408,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         lastEngine = 3;
         log("上游引擎启动中…");
         EngineService.start(this, upstreamProto(), upstreamPolicy(), upstreamDns(),
-                upstreamIpv6(), upstreamMtu(), upstreamRules());
+                upstreamIpv6(), upstreamMtu(), upstreamRules(),
+                prefs().getString(KEY_EXIT_IDS, ""),
+                prefs().getString(KEY_EXIT_LABEL, ""),
+                prefs().getString(KEY_EXIT_COUNTRY, ""));
         scheduleEngineCheck();
     }
 
@@ -832,6 +852,100 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * Starts the engine the user picked: 0 = built-in WireGuard, 1 = mihomo with
      * a wireguard outbound, 2 = mihomo with a MASQUE outbound (EC keys, port 443).
      */
+    private String exitLabelText() {
+        String label = prefs().getString(KEY_EXIT_LABEL, "");
+        return label.isEmpty() ? "未启用（点此选择）" : label;
+    }
+
+    /** Node picker for the VPN Gate second hop. */
+    private void showExitDialog() {
+        if (EngineService.running) {
+            toast("请先断开连接，再切换第二跳出口");
+            return;
+        }
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(8), dp(16), dp(8));
+
+        final LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        final TextView status = new TextView(this);
+        status.setText("加载节点列表…");
+        status.setTextColor(C_MUTED);
+        status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+
+        content.addView(status);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        content.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(320)));
+
+        final android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
+                .setTitle("第二跳出口（VPN Gate）")
+                .setView(content)
+                .setNegativeButton("关闭", null)
+                .setNeutralButton("清除", null)
+                .create();
+        dialog.setOnShowListener(new android.content.DialogInterface.OnShowListener() {
+            public void onShow(android.content.DialogInterface d) {
+                if (dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL) != null) {
+                    dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL)
+                            .setOnClickListener(new View.OnClickListener() {
+                                public void onClick(View v) {
+                                    prefs().edit()
+                                            .remove(KEY_EXIT_IDS)
+                                            .remove(KEY_EXIT_LABEL)
+                                            .remove(KEY_EXIT_COUNTRY).apply();
+                                    exitValue.setText(exitLabelText());
+                                    dialog.dismiss();
+                                }
+                            });
+                }
+            }
+        });
+        dialog.show();
+        loadExitNodes(list, status);
+    }
+
+    private void loadExitNodes(final LinearLayout list, final TextView status) {
+        new Thread(new Runnable() {
+            public void run() {
+                final java.util.List<VpnGate.Node> nodes = EngineService.loadVpnGateNodes(MainActivity.this, true);
+                ui.post(new Runnable() {
+                    public void run() {
+                        list.removeAllViews();
+                        if (nodes.isEmpty()) {
+                            status.setText("没有拿到节点：检查网络后重开此窗口");
+                            return;
+                        }
+                        status.setText("共 " + nodes.size() + " 个节点（家宽优先，点一个即选定）");
+                        int shown = Math.min(nodes.size(), 40);
+                        for (int i = 0; i < shown; i++) {
+                            final VpnGate.Node node = nodes.get(i);
+                            TextView row = new TextView(MainActivity.this);
+                            row.setText(node.label() + "\n" + node.host + ":" + node.port
+                                    + (node.latencyMs > 0 ? "  ·  " + node.latencyMs + " ms" : ""));
+                            row.setTextColor(C_TEXT);
+                            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                            row.setPadding(dp(4), dp(10), dp(4), dp(10));
+                            row.setOnClickListener(new View.OnClickListener() {
+                                public void onClick(View v) {
+                                    prefs().edit()
+                                            .putString(KEY_EXIT_IDS, node.id)
+                                            .putString(KEY_EXIT_LABEL, node.country + " · " + node.classLabel())
+                                            .putString(KEY_EXIT_COUNTRY, node.cc).apply();
+                                    exitValue.setText(exitLabelText());
+                                    log("第二跳出口选定：" + node.country + " " + node.host);
+                                    toast("已选：" + node.country);
+                                }
+                            });
+                            list.addView(row);
+                        }
+                    }
+                });
+            }
+        }, "vpn-gate-nodes").start();
+    }
     private String upstreamProto() {
         int index = protoSpinner == null ? prefs().getInt(KEY_PROTO, 0) : protoSpinner.getSelectedItemPosition();
         if (index < 0 || index >= UPSTREAM_PROTOS.length) {
@@ -1746,6 +1860,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
 
 
 

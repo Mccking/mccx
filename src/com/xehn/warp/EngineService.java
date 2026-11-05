@@ -10,6 +10,7 @@ import com.xiaohe.engine.Engine;
 import com.xiaohe.engine.Engine_;
 import com.xiaohe.engine.LogSink;
 import com.xiaohe.engine.Protector;
+import com.xiaohe.engine.TunProvider;
 
 import org.json.JSONObject;
 
@@ -40,6 +41,9 @@ public final class EngineService extends VpnService {
     public static final String EXTRA_IPV6 = "ipv6";
     public static final String EXTRA_MTU = "mtu";
     public static final String EXTRA_RULES = "rules";
+    public static final String EXTRA_EXIT_IDS = "exit_ids";
+    public static final String EXTRA_EXIT_LABEL = "exit_label";
+    public static final String EXTRA_EXIT_COUNTRY = "exit_country";
 
     private static final int DEFAULT_MTU = 1280;
     private static final long POLL_MS = 1000;
@@ -107,12 +111,15 @@ public final class EngineService extends VpnService {
                 intent.getStringExtra(EXTRA_DNS),
                 intent.getBooleanExtra(EXTRA_IPV6, false),
                 intent.getIntExtra(EXTRA_MTU, DEFAULT_MTU),
-                intent.getStringExtra(EXTRA_RULES));
+                intent.getStringExtra(EXTRA_RULES),
+                intent.getStringExtra(EXTRA_EXIT_IDS),
+                intent.getStringExtra(EXTRA_EXIT_LABEL),
+                intent.getStringExtra(EXTRA_EXIT_COUNTRY));
         return START_NOT_STICKY;
     }
 
     private void startTunnel(String protoName, String policy, String dns, boolean ipv6, int mtu,
-                             String rules) {
+                             String rules, String exitIds, String exitLabel, String exitCountry) {
         try {
             File dir = new File(getFilesDir(), "engine");
             if (!dir.exists() && !dir.mkdirs()) {
@@ -133,31 +140,45 @@ public final class EngineService extends VpnService {
             engine.setTimeout(5);
             engine.setSocksListen("");
 
-            Builder builder = new Builder();
-            builder.setSession("MccX");
-            builder.setMtu(mtu);
-            builder.addAddress("172.16.0.2", 32);
-            if (ipv6) {
-                builder.addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 128);
-            }
-            applyRoutes(builder, policy, rules);
-            if (ipv6) {
-                builder.addRoute("::", 0);
-            }
-            for (String server : resolveDns(dns)) {
-                try {
-                    builder.addDnsServer(server);
-                } catch (Throwable ignored) {
+            boolean hasExit = exitIds != null && !exitIds.trim().isEmpty();
+            if (hasExit) {
+                // The second hop owns the system tun: the engine asks for one via
+                // TunProvider once the OpenVPN handshake pushes its address.
+                engine.setOpenVPNExit(exitIds.trim(), nullToEmpty(exitLabel), nullToEmpty(exitCountry));
+                engine.setTunProvider(new TunProvider() {
+                    public long establishTun(String address, long prefixLen, String routesCsv,
+                                             String dnsCsv, long engineMtu) {
+                        return establishForEngine(address, prefixLen, routesCsv, dnsCsv, engineMtu);
+                    }
+                });
+                remember("第二跳出口：" + nullToEmpty(exitLabel) + "（" + exitIds.trim() + "）");
+            } else {
+                Builder builder = new Builder();
+                builder.setSession("MccX");
+                builder.setMtu(mtu);
+                builder.addAddress("172.16.0.2", 32);
+                if (ipv6) {
+                    builder.addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 128);
                 }
-            }
-            builder.setBlocking(true);
-            tun = builder.establish();
-            if (tun == null) {
-                throw new IOException("establish() 返回 null（VPN 未授权）");
+                applyRoutes(builder, policy, rules);
+                if (ipv6) {
+                    builder.addRoute("::", 0);
+                }
+                for (String server : resolveDns(dns)) {
+                    try {
+                        builder.addDnsServer(server);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                builder.setBlocking(true);
+                tun = builder.establish();
+                if (tun == null) {
+                    throw new IOException("establish() 返回 null（VPN 未授权）");
+                }
+                engine.setTunFD(tun.getFd());
+                engine.setVPNState(true);
             }
 
-            engine.setTunFD(tun.getFd());
-            engine.setVPNState(true);
             remember("engine: " + engine.versionString() + "，协议 " + protoName
                     + "，MTU " + mtu + (ipv6 ? "，IPv6 开" : ""));
             engine.setRules(policy, rules == null ? "" : rules);
@@ -172,6 +193,66 @@ public final class EngineService extends VpnService {
         }
     }
 
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    /**
+     * Called by the engine when the second hop needs a system tun (OpenVPN
+     * exit). The descriptor stays owned here; the engine only borrows the number.
+     */
+    private long establishForEngine(String address, long prefixLen, String routesCsv,
+                                    String dnsCsv, long engineMtu) {
+        try {
+            Builder builder = new Builder();
+            builder.setSession("MccX");
+            int mtuValue = (int) (engineMtu > 0 ? engineMtu : DEFAULT_MTU);
+            builder.setMtu(mtuValue);
+            builder.addAddress(address, (int) prefixLen);
+            if (routesCsv != null) {
+                for (String route : routesCsv.split(",")) {
+                    String value = route.trim();
+                    int slash = value.indexOf('/');
+                    if (slash <= 0) {
+                        continue;
+                    }
+                    try {
+                        builder.addRoute(value.substring(0, slash),
+                                Integer.parseInt(value.substring(slash + 1)));
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            if (dnsCsv != null) {
+                for (String dns : dnsCsv.split(",")) {
+                    String value = dns.trim();
+                    if (value.isEmpty()) {
+                        continue;
+                    }
+                    try {
+                        builder.addDnsServer(value);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            builder.setBlocking(true);
+            ParcelFileDescriptor descriptor = builder.establish();
+            if (descriptor == null) {
+                remember("第二跳 tun 建立失败（未授权）");
+                return -1;
+            }
+            tun = descriptor;
+            if (engine != null) {
+                engine.setTunFD(descriptor.getFd());
+                engine.setVPNState(true);
+            }
+            remember("第二跳 tun 已建立：" + address + "/" + prefixLen + "，MTU " + mtuValue);
+            return descriptor.getFd();
+        } catch (Throwable t) {
+            remember("第二跳 tun 异常：" + t.getMessage());
+            return -1;
+        }
+    }
     private static List<String> resolveDns(String csv) {
         List<String> out = new ArrayList<String>();
         if (csv != null) {
@@ -341,7 +422,8 @@ public final class EngineService extends VpnService {
     }
 
     public static void start(Context context, String proto, String policy,
-                             String dns, boolean ipv6, int mtu, String rules) {
+                             String dns, boolean ipv6, int mtu, String rules,
+                             String exitIds, String exitLabel, String exitCountry) {
         Intent intent = new Intent(context, EngineService.class)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_PROTO, proto)
@@ -349,11 +431,60 @@ public final class EngineService extends VpnService {
                 .putExtra(EXTRA_DNS, dns)
                 .putExtra(EXTRA_IPV6, ipv6)
                 .putExtra(EXTRA_MTU, mtu)
-                .putExtra(EXTRA_RULES, rules);
+                .putExtra(EXTRA_RULES, rules)
+                .putExtra(EXTRA_EXIT_IDS, exitIds)
+                .putExtra(EXTRA_EXIT_LABEL, exitLabel)
+                .putExtra(EXTRA_EXIT_COUNTRY, exitCountry);
         context.startService(intent);
+    }
+
+    /** Fetches the current VPN Gate node list (blocking; call off the UI thread). */
+    public static java.util.List<VpnGate.Node> loadVpnGateNodes(Context context, boolean refresh) {
+        try {
+            File dir = new File(context.getFilesDir(), "engine");
+            if (!dir.exists() && !dir.mkdirs()) {
+                return new java.util.ArrayList<VpnGate.Node>();
+            }
+            Engine_ handle = Engine.newEngine(dir.getAbsolutePath());
+            try {
+                if (refresh) {
+                    handle.refreshVPNGateNodes();
+                }
+                return VpnGate.parse(handle.vpnGateNodesJSON());
+            } finally {
+                try {
+                    handle.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable t) {
+            return new java.util.ArrayList<VpnGate.Node>();
+        }
+    }
+
+    /** Real OpenVPN handshake test; slower than a ping but it is the real thing. */
+    public static String testVpnGateNodes(Context context, String idsCsv) {
+        try {
+            File dir = new File(context.getFilesDir(), "engine");
+            if (!dir.exists() && !dir.mkdirs()) {
+                return "";
+            }
+            Engine_ handle = Engine.newEngine(dir.getAbsolutePath());
+            try {
+                return handle.testOpenVPNNodes(idsCsv);
+            } finally {
+                try {
+                    handle.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     public static void stop(Context context) {
         context.startService(new Intent(context, EngineService.class).setAction(ACTION_STOP));
     }
 }
+

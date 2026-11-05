@@ -155,6 +155,50 @@ public final class SplitRoute {
         return out;
     }
 
+    /**
+     * Parses custom rules for the blacklist policy: one {@code proxy,<cidr>} per
+     * line. Anything malformed is skipped — a typo must never block connecting.
+     */
+    public static List<String[]> parseProxyCidrs(String text) {
+        List<String[]> out = new ArrayList<String[]>();
+        if (text == null) {
+            return out;
+        }
+        for (String raw : text.split("\n")) {
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            int comma = line.indexOf(',');
+            if (comma <= 0) {
+                continue;
+            }
+            String action = line.substring(0, comma).trim();
+            if (!"proxy".equalsIgnoreCase(action)) {
+                continue;
+            }
+            String cidr = line.substring(comma + 1).trim();
+            int slash = cidr.indexOf('/');
+            if (slash <= 0) {
+                continue;
+            }
+            int network = ipToInt(cidr.substring(0, slash));
+            if (network == Integer.MIN_VALUE) {
+                continue;
+            }
+            int prefix;
+            try {
+                prefix = Integer.parseInt(cidr.substring(slash + 1));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (prefix < 0 || prefix > 32) {
+                continue;
+            }
+            out.add(new String[]{intToIp(network), String.valueOf(prefix)});
+        }
+        return out;
+    }
     public static String intToIp(int value) {
         return ((value >>> 24) & 0xFF) + "." + ((value >>> 16) & 0xFF) + "."
                 + ((value >>> 8) & 0xFF) + "." + (value & 0xFF);
@@ -191,3 +235,4 @@ public final class SplitRoute {
         return value;
     }
 }
+

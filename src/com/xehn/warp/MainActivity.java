@@ -22,6 +22,8 @@ import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.Switch;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -55,6 +57,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private static final String KEY_ENGINE = "engine_index";
     private static final String KEY_PROTO = "upstream_proto";
     private static final String KEY_POLICY = "route_policy";
+    private static final String KEY_DNS = "dns_index";
+    private static final String KEY_IPV6 = "ipv6_enabled";
+    private static final String KEY_MTU = "mtu_index";
+    private static final String KEY_RULES = "custom_rules";
 
     /** Upstream engine protocols, mirrors the desktop flags. */
     private static final String[][] UPSTREAM_PROTOS = {
@@ -78,6 +84,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private Spinner portSpinner;
     private Spinner protoSpinner;
     private Spinner policySpinner;
+    private Spinner dnsSpinner;
+    private Spinner mtuSpinner;
+    private Switch ipv6Switch;
+    private EditText rulesInput;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
     private int pendingEngine;
@@ -308,7 +318,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(sectionLabel("连接"));
         engineSpinner = new Spinner(this);
         engineSpinner.setAdapter(spinnerAdapter(new String[]{
-                "内置 WireGuard", "mihomo（实验）", "mihomo · MASQUE（实验）", "上游引擎（实验）"
+                "内置 WireGuard", "上游引擎（实验）"
         }));
         engineSpinner.setSelection(prefs().getInt(KEY_ENGINE, 0));
         card.addView(settingsRow("隧道引擎", engineSpinner));
@@ -324,6 +334,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(settingsRow("上游协议", protoSpinner));
         card.addView(divider());
 
+        mtuSpinner = new Spinner(this);
+        mtuSpinner.setAdapter(spinnerAdapter(new String[]{"1280", "1400", "1420", "1500"}));
+        mtuSpinner.setSelection(prefs().getInt(KEY_MTU, 0));
+        card.addView(settingsRow("MTU", mtuSpinner));
+        card.addView(divider());
+
         portSpinner = new Spinner(this);
         String[] portLabels = new String[PORTS.length];
         for (int i = 0; i < PORTS.length; i++) {
@@ -333,14 +349,83 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         portSpinner.setSelection(prefs().getInt(KEY_PORT, 2));
         card.addView(settingsRow("端点端口", portSpinner));
 
+        card.addView(sectionLabel("网络"));
+        dnsSpinner = new Spinner(this);
+        dnsSpinner.setAdapter(spinnerAdapter(new String[]{
+                "1.1.1.1", "8.8.8.8", "223.5.5.5", "119.29.29.29"
+        }));
+        dnsSpinner.setSelection(prefs().getInt(KEY_DNS, 0));
+        card.addView(settingsRow("DNS", dnsSpinner));
+        card.addView(divider());
+
+        ipv6Switch = new Switch(this);
+        ipv6Switch.setChecked(prefs().getBoolean(KEY_IPV6, false));
+        card.addView(settingsRow("IPv6", ipv6Switch));
+
         card.addView(sectionLabel("路由"));
         policySpinner = new Spinner(this);
-        policySpinner.setAdapter(spinnerAdapter(new String[]{"全局", "绕过大陆"}));
+        policySpinner.setAdapter(spinnerAdapter(new String[]{"全局", "绕过大陆", "黑名单"}));
         policySpinner.setSelection(prefs().getInt(KEY_POLICY, 0));
         card.addView(settingsRow("分流", policySpinner));
+        card.addView(divider());
+
+        rulesInput = new EditText(this);
+        rulesInput.setText(prefs().getString(KEY_RULES, ""));
+        rulesInput.setHint("proxy,1.2.3.0/24（每行一条）");
+        rulesInput.setHintTextColor(C_MUTED);
+        rulesInput.setTextColor(C_TEXT);
+        rulesInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        rulesInput.setBackgroundColor(0x00000000);
+        rulesInput.setMinLines(2);
+        rulesInput.setMaxLines(4);
+        rulesInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        card.addView(rulesInput);
         return card;
     }
 
+    /** Everything the upstream engine needs, snapshotted from the settings UI. */
+    private void connectUpstream() {
+        int engineIndex = engineSpinner == null ? 0 : engineSpinner.getSelectedItemPosition();
+        prefs().edit().putInt(KEY_ENGINE, engineIndex).apply();
+        lastEngine = 3;
+        log("上游引擎启动中…");
+        EngineService.start(this, upstreamProto(), upstreamPolicy(), upstreamDns(),
+                upstreamIpv6(), upstreamMtu(), upstreamRules());
+        scheduleEngineCheck();
+    }
+
+    private String upstreamDns() {
+        String[] servers = {"1.1.1.1", "8.8.8.8", "223.5.5.5", "119.29.29.29"};
+        int index = dnsSpinner == null ? prefs().getInt(KEY_DNS, 0) : dnsSpinner.getSelectedItemPosition();
+        if (index < 0 || index >= servers.length) {
+            index = 0;
+        }
+        prefs().edit().putInt(KEY_DNS, index).apply();
+        return servers[index];
+    }
+
+    private boolean upstreamIpv6() {
+        boolean value = ipv6Switch == null ? prefs().getBoolean(KEY_IPV6, false) : ipv6Switch.isChecked();
+        prefs().edit().putBoolean(KEY_IPV6, value).apply();
+        return value;
+    }
+
+    private int upstreamMtu() {
+        int[] values = {1280, 1400, 1420, 1500};
+        int index = mtuSpinner == null ? prefs().getInt(KEY_MTU, 0) : mtuSpinner.getSelectedItemPosition();
+        if (index < 0 || index >= values.length) {
+            index = 0;
+        }
+        prefs().edit().putInt(KEY_MTU, index).apply();
+        return values[index];
+    }
+
+    private String upstreamRules() {
+        String text = rulesInput == null ? prefs().getString(KEY_RULES, "") : rulesInput.getText().toString();
+        prefs().edit().putString(KEY_RULES, text).apply();
+        return text;
+    }
     /** Spinners live outside our palette, so their text has to be painted. */
     private ArrayAdapter<String> spinnerAdapter(final String[] items) {
         ArrayAdapter<String> adapter = new ArrayAdapter<String>(this,
@@ -701,8 +786,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
         final int portIndex = Math.max(0, portSpinner.getSelectedItemPosition());
         final int port = PORTS[portIndex];
-        final int engine = engineSpinner.getSelectedItemPosition();
-        prefs().edit().putInt(KEY_ENGINE, engine).apply();
+        final int engine = engineSpinner.getSelectedItemPosition() == 0 ? 0 : 3;
+        prefs().edit().putInt(KEY_ENGINE, engineSpinner.getSelectedItemPosition()).apply();
         portPlan = orderPorts(portIndex);
         portAttempt = 0;
 
@@ -759,7 +844,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private String upstreamPolicy() {
         int index = policySpinner == null ? prefs().getInt(KEY_POLICY, 0) : policySpinner.getSelectedItemPosition();
         prefs().edit().putInt(KEY_POLICY, index).apply();
-        return index == 1 ? "bypass-cn" : "global";
+        if (index == 1) {
+            return "bypass-cn";
+        }
+        return index == 2 ? "blacklist" : "global";
     }
     private void launch(int engine, String configText, Warp.Result result) {
         lastEngine = engine;
@@ -773,9 +861,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             return;
         }
         if (engine == 3) {
-            log("上游引擎启动中…");
-            EngineService.start(this, upstreamProto(), upstreamPolicy());
-            scheduleEngineCheck();
+            connectUpstream();
             return;
         }
         try {
@@ -1660,6 +1746,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
 
 
 

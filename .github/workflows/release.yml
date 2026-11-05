@@ -45,21 +45,8 @@ jobs:
           fi
           printf '%s' "$KS_BASE64" | base64 -d > keystore.jks
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-
-      - name: Build fd launcher
-        run: |
-          cd core
-          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
-            -o ../libs/arm64-v8a/libmccxcore.so .
-
-      # The stock mihomo Android binary aborts TUN start with
-      # "build android rules: read packages list: ... permission denied",
-      # so the engine is built here with tools/patch_mihomo.py applied.
-      - name: Build mihomo engine (patched)
-        run: bash tools/build_mihomo.sh
+      # The upstream Go engine is shipped as lib/engine.aar (see the service),
+      # so the legacy mihomo subprocess and its launcher are no longer built.
       - name: Sync upstream constants
         id: sync
         shell: pwsh
@@ -101,6 +88,7 @@ jobs:
           files: |
             dist/*.apk
             dist/update.json
+
 
 
 

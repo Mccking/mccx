@@ -11,6 +11,8 @@ import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.Typeface;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.VpnService;
 import android.os.Bundle;
 import android.os.Handler;
@@ -127,6 +129,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private int lastEngine;
     private String lastWgConfig = "";
     private String lastMihomoYaml = "";
+    private volatile String[] lastUpstreamArgs;
+    private volatile boolean engineRestartPending;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean networkCallbackWarm;
     private int recloseCount;
 
     private final Warp.Log logger = new Warp.Log() {
@@ -140,6 +146,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         super.onCreate(state);
         applyPalette();
         LogStore.init(this);
+        registerNetworkCallback();
         try {
             getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(C_BG));
         } catch (Exception ignored) {
@@ -356,7 +363,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(sectionLabel("网络"));
         dnsSpinner = new Spinner(this);
         dnsSpinner.setAdapter(spinnerAdapter(new String[]{
-                "1.1.1.1", "8.8.8.8", "223.5.5.5", "119.29.29.29"
+                "自动", "1.1.1.1", "8.8.8.8", "223.5.5.5", "119.29.29.29"
         }));
         dnsSpinner.setSelection(prefs().getInt(KEY_DNS, 0));
         card.addView(settingsRow("DNS", dnsSpinner));
@@ -407,22 +414,36 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         prefs().edit().putInt(KEY_ENGINE, engineIndex).apply();
         lastEngine = 3;
         log("上游引擎启动中…");
-        EngineService.start(this, upstreamProto(), upstreamPolicy(), upstreamDns(),
-                upstreamIpv6(), upstreamMtu(), upstreamRules(),
+        lastUpstreamArgs = new String[]{
+                upstreamProto(), upstreamPolicy(), upstreamDns(),
+                upstreamIpv6() ? "1" : "0", String.valueOf(upstreamMtu()), upstreamRules(),
                 prefs().getString(KEY_EXIT_IDS, ""),
                 prefs().getString(KEY_EXIT_LABEL, ""),
-                prefs().getString(KEY_EXIT_COUNTRY, ""));
+                prefs().getString(KEY_EXIT_COUNTRY, "")
+        };
+        EngineService.start(this, lastUpstreamArgs[0], lastUpstreamArgs[1], lastUpstreamArgs[2],
+                upstreamIpv6(), upstreamMtu(), lastUpstreamArgs[5],
+                lastUpstreamArgs[6], lastUpstreamArgs[7], lastUpstreamArgs[8]);
         scheduleEngineCheck();
     }
 
+    /**
+     * DNS picker. "自动" follows the split policy: bypass-CN wants a domestic
+     * resolver so mainland domains do not pay a round trip through the tunnel,
+     * while global mode uses Cloudflare so nothing gets poisoned locally.
+     */
     private String upstreamDns() {
-        String[] servers = {"1.1.1.1", "8.8.8.8", "223.5.5.5", "119.29.29.29"};
+        String[] servers = {null, "1.1.1.1", "8.8.8.8", "223.5.5.5", "119.29.29.29"};
         int index = dnsSpinner == null ? prefs().getInt(KEY_DNS, 0) : dnsSpinner.getSelectedItemPosition();
         if (index < 0 || index >= servers.length) {
             index = 0;
         }
         prefs().edit().putInt(KEY_DNS, index).apply();
-        return servers[index];
+        if (servers[index] != null) {
+            return servers[index];
+        }
+        boolean domestic = "bypass-cn".equals(upstreamPolicy()) || "blacklist".equals(upstreamPolicy());
+        return domestic ? "223.5.5.5" : "1.1.1.1";
     }
 
     private boolean upstreamIpv6() {
@@ -1179,6 +1200,72 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         return String.format(java.util.Locale.US, "%02d:%02d:%02d",
                 seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     }
+    /**
+     * Mobile networks switch under the tunnel all the time (Wi-Fi to cellular,
+     * cell handover). Waiting for the watchdog costs up to 45 seconds; reacting
+     * to the connectivity callback cuts that to a couple of seconds.
+     */
+    private void registerNetworkCallback() {
+        try {
+            ConnectivityManager manager =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) {
+                return;
+            }
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    if (!networkCallbackWarm) {
+                        networkCallbackWarm = true;
+                        return;
+                    }
+                    ui.postDelayed(networkReconnect, 2000);
+                }
+            };
+            manager.registerDefaultNetworkCallback(networkCallback);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private final Runnable networkReconnect = new Runnable() {
+        public void run() {
+            boolean up = EngineService.running || MihomoVpnService.running
+                    || TunnelManager.state() == Tunnel.State.UP;
+            if (!up || busy || userDown || engineRestartPending) {
+                return;
+            }
+            log("网络已切换，自动重连…");
+            connectionReady = false;
+            reconnectForNetwork();
+        }
+    };
+
+    private void reconnectForNetwork() {
+        if (lastEngine == 3 && lastUpstreamArgs != null) {
+            restartUpstreamEngine();
+        } else if (lastEngine == 0 && !lastWgConfig.isEmpty()) {
+            applyUp(lastWgConfig);
+        } else if (!lastMihomoYaml.isEmpty()) {
+            startMihomoEngine(lastMihomoYaml);
+        }
+    }
+
+    private void restartUpstreamEngine() {
+        final String[] args = lastUpstreamArgs;
+        if (args == null) {
+            return;
+        }
+        engineRestartPending = true;
+        EngineService.stop(this);
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                EngineService.start(MainActivity.this, args[0], args[1], args[2],
+                        "1".equals(args[3]), Integer.parseInt(args[4]), args[5],
+                        args[6], args[7], args[8]);
+                engineRestartPending = false;
+            }
+        }, 800);
+    }
     private void markReady() {
         connectionReady = true;
         connectionFailed = false;
@@ -1224,6 +1311,15 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         if (tick % 3 != 0) {
             return true;   // probe roughly every 15 seconds, not every tick
         }
+        if (lastEngine == 3 && EngineService.running) {
+            String state = EngineService.state;
+            if ("error".equals(state)) {
+                log("看门狗：上游引擎报错 " + EngineService.message);
+                return false;
+            }
+            // connecting/stopping are transient: only a hard error counts.
+            return true;
+        }
         if (MihomoVpnService.running) {
             try {
                 MihomoApi.delay("warp", 3000);
@@ -1262,6 +1358,17 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 render();
             }
         });
+        if (lastEngine == 3) {
+            if (lastUpstreamArgs == null) {
+                return false;
+            }
+            ui.post(new Runnable() {
+                public void run() {
+                    restartUpstreamEngine();
+                }
+            });
+            return true;
+        }
         if (lastEngine == 0 && !lastWgConfig.isEmpty()) {
             applyUp(lastWgConfig);
         } else if (!lastMihomoYaml.isEmpty()) {
@@ -1860,6 +1967,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
 
 
 

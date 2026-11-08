@@ -41,6 +41,7 @@ public final class EngineService extends VpnService {
     public static final String EXTRA_IPV6 = "ipv6";
     public static final String EXTRA_MTU = "mtu";
     public static final String EXTRA_RULES = "rules";
+    public static final String EXTRA_TIMEOUT = "timeout_sec";
     public static final String EXTRA_EXIT_IDS = "exit_ids";
     public static final String EXTRA_EXIT_LABEL = "exit_label";
     public static final String EXTRA_EXIT_COUNTRY = "exit_country";
@@ -63,6 +64,8 @@ public final class EngineService extends VpnService {
     public static volatile long upBytes;
     public static volatile long downBytes;
     public static volatile long uptimeMs;
+    /** The engine decided the session is dead and wants a reconnect. */
+    public static volatile boolean needRecover;
 
     private static final ArrayDeque<String> RECENT = new ArrayDeque<String>();
 
@@ -114,12 +117,14 @@ public final class EngineService extends VpnService {
                 intent.getStringExtra(EXTRA_RULES),
                 intent.getStringExtra(EXTRA_EXIT_IDS),
                 intent.getStringExtra(EXTRA_EXIT_LABEL),
-                intent.getStringExtra(EXTRA_EXIT_COUNTRY));
+                intent.getStringExtra(EXTRA_EXIT_COUNTRY),
+                intent.getIntExtra(EXTRA_TIMEOUT, 5));
         return START_NOT_STICKY;
     }
 
     private void startTunnel(String protoName, String policy, String dns, boolean ipv6, int mtu,
-                             String rules, String exitIds, String exitLabel, String exitCountry) {
+                             String rules, String exitIds, String exitLabel, String exitCountry,
+                             int timeoutSec) {
         try {
             File dir = new File(getFilesDir(), "engine");
             if (!dir.exists() && !dir.mkdirs()) {
@@ -137,7 +142,7 @@ public final class EngineService extends VpnService {
                     return EngineService.this.protect((int) fd);
                 }
             });
-            engine.setTimeout(5);
+            engine.setTimeout(timeoutSec > 0 ? timeoutSec : 5);
             engine.setSocksListen("");
 
             boolean hasExit = exitIds != null && !exitIds.trim().isEmpty();
@@ -389,6 +394,7 @@ public final class EngineService extends VpnService {
             upBytes = o.optLong("upBytes", upBytes);
             downBytes = o.optLong("downBytes", downBytes);
             uptimeMs = o.optLong("uptimeMS", uptimeMs);
+            needRecover = o.optBoolean("needRecover", needRecover);
         } catch (Throwable ignored) {
         }
     }
@@ -397,6 +403,7 @@ public final class EngineService extends VpnService {
         stopped = true;
         running = false;
         state = "";
+        needRecover = false;
         try {
             if (engine != null) {
                 engine.setVPNState(false);
@@ -423,7 +430,7 @@ public final class EngineService extends VpnService {
 
     public static void start(Context context, String proto, String policy,
                              String dns, boolean ipv6, int mtu, String rules,
-                             String exitIds, String exitLabel, String exitCountry) {
+                             String exitIds, String exitLabel, String exitCountry, int timeoutSec) {
         Intent intent = new Intent(context, EngineService.class)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_PROTO, proto)
@@ -434,7 +441,8 @@ public final class EngineService extends VpnService {
                 .putExtra(EXTRA_RULES, rules)
                 .putExtra(EXTRA_EXIT_IDS, exitIds)
                 .putExtra(EXTRA_EXIT_LABEL, exitLabel)
-                .putExtra(EXTRA_EXIT_COUNTRY, exitCountry);
+                .putExtra(EXTRA_EXIT_COUNTRY, exitCountry)
+                .putExtra(EXTRA_TIMEOUT, timeoutSec);
         context.startService(intent);
     }
 
@@ -487,4 +495,5 @@ public final class EngineService extends VpnService {
         context.startService(new Intent(context, EngineService.class).setAction(ACTION_STOP));
     }
 }
+
 

@@ -63,6 +63,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private static final String KEY_IPV6 = "ipv6_enabled";
     private static final String KEY_MTU = "mtu_index";
     private static final String KEY_RULES = "custom_rules";
+    private static final String KEY_TIMEOUT = "handshake_timeout_sec";
+    private static final String KEY_EXIT_CANDIDATES = "exit_candidates";
     private static final String KEY_EXIT_IDS = "exit_ids";
     private static final String KEY_EXIT_LABEL = "exit_label";
     private static final String KEY_EXIT_COUNTRY = "exit_country";
@@ -93,6 +95,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private Spinner mtuSpinner;
     private Switch ipv6Switch;
     private EditText rulesInput;
+    private Spinner timeoutSpinner;
+    private final java.util.Map<String, long[]> probeResults = new java.util.HashMap<String, long[]>();
     private TextView exitValue;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
@@ -351,6 +355,12 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(settingsRow("MTU", mtuSpinner));
         card.addView(divider());
 
+        timeoutSpinner = new Spinner(this);
+        timeoutSpinner.setAdapter(spinnerAdapter(new String[]{"3 秒", "5 秒", "8 秒"}));
+        timeoutSpinner.setSelection(prefs().getInt(KEY_TIMEOUT, 1));
+        card.addView(settingsRow("握手超时", timeoutSpinner));
+        card.addView(divider());
+
         portSpinner = new Spinner(this);
         String[] portLabels = new String[PORTS.length];
         for (int i = 0; i < PORTS.length; i++) {
@@ -419,11 +429,13 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 upstreamIpv6() ? "1" : "0", String.valueOf(upstreamMtu()), upstreamRules(),
                 prefs().getString(KEY_EXIT_IDS, ""),
                 prefs().getString(KEY_EXIT_LABEL, ""),
-                prefs().getString(KEY_EXIT_COUNTRY, "")
+                prefs().getString(KEY_EXIT_COUNTRY, ""),
+                String.valueOf(handshakeTimeout())
         };
         EngineService.start(this, lastUpstreamArgs[0], lastUpstreamArgs[1], lastUpstreamArgs[2],
-                upstreamIpv6(), upstreamMtu(), lastUpstreamArgs[5],
-                lastUpstreamArgs[6], lastUpstreamArgs[7], lastUpstreamArgs[8]);
+                "1".equals(lastUpstreamArgs[3]), Integer.parseInt(lastUpstreamArgs[4]), lastUpstreamArgs[5],
+                exitIdsForConnect(), lastUpstreamArgs[7], lastUpstreamArgs[8],
+                Integer.parseInt(lastUpstreamArgs[9]));
         scheduleEngineCheck();
     }
 
@@ -873,10 +885,24 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * Starts the engine the user picked: 0 = built-in WireGuard, 1 = mihomo with
      * a wireguard outbound, 2 = mihomo with a MASQUE outbound (EC keys, port 443).
      */
+    /**
+     * Candidate ids in try order. VPN Gate nodes mostly fail the handshake, so
+     * several are offered and the engine walks the list.
+     */
+    private String exitIdsForConnect() {
+        String candidates = prefs().getString(KEY_EXIT_CANDIDATES, "");
+        if (!candidates.isEmpty()) {
+            return candidates;
+        }
+        return prefs().getString(KEY_EXIT_IDS, "");
+    }
+
     private String exitLabelText() {
         String label = prefs().getString(KEY_EXIT_LABEL, "");
         return label.isEmpty() ? "未启用（点此选择）" : label;
     }
+
+    private java.util.List<VpnGate.Node> lastExitNodes = new java.util.ArrayList<VpnGate.Node>();
 
     /** Node picker for the VPN Gate second hop. */
     private void showExitDialog() {
@@ -895,11 +921,18 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         status.setTextColor(C_MUTED);
         status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
 
+        TextView probe = new TextView(this);
+        probe.setText("测延迟（真做一次 OpenVPN 握手）");
+        probe.setTextColor(C_ACCENT);
+        probe.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        probe.setPadding(0, dp(8), 0, dp(4));
+
         content.addView(status);
+        content.addView(probe);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(list);
         content.addView(scroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(320)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(340)));
 
         final android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
                 .setTitle("第二跳出口（VPN Gate）")
@@ -916,12 +949,18 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                                     prefs().edit()
                                             .remove(KEY_EXIT_IDS)
                                             .remove(KEY_EXIT_LABEL)
-                                            .remove(KEY_EXIT_COUNTRY).apply();
+                                            .remove(KEY_EXIT_COUNTRY)
+                                            .remove(KEY_EXIT_CANDIDATES).apply();
                                     exitValue.setText(exitLabelText());
                                     dialog.dismiss();
                                 }
                             });
                 }
+            }
+        });
+        probe.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                probeNodes(list, status);
             }
         });
         dialog.show();
@@ -934,39 +973,156 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 final java.util.List<VpnGate.Node> nodes = EngineService.loadVpnGateNodes(MainActivity.this, true);
                 ui.post(new Runnable() {
                     public void run() {
-                        list.removeAllViews();
-                        if (nodes.isEmpty()) {
-                            status.setText("没有拿到节点：检查网络后重开此窗口");
-                            return;
-                        }
-                        status.setText("共 " + nodes.size() + " 个节点（家宽优先，点一个即选定）");
-                        int shown = Math.min(nodes.size(), 40);
-                        for (int i = 0; i < shown; i++) {
-                            final VpnGate.Node node = nodes.get(i);
-                            TextView row = new TextView(MainActivity.this);
-                            row.setText(node.label() + "\n" + node.host + ":" + node.port
-                                    + (node.latencyMs > 0 ? "  ·  " + node.latencyMs + " ms" : ""));
-                            row.setTextColor(C_TEXT);
-                            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-                            row.setPadding(dp(4), dp(10), dp(4), dp(10));
-                            row.setOnClickListener(new View.OnClickListener() {
-                                public void onClick(View v) {
-                                    prefs().edit()
-                                            .putString(KEY_EXIT_IDS, node.id)
-                                            .putString(KEY_EXIT_LABEL, node.country + " · " + node.classLabel())
-                                            .putString(KEY_EXIT_COUNTRY, node.cc).apply();
-                                    exitValue.setText(exitLabelText());
-                                    log("第二跳出口选定：" + node.country + " " + node.host);
-                                    toast("已选：" + node.country);
-                                }
-                            });
-                            list.addView(row);
-                        }
+                        lastExitNodes = nodes;
+                        renderExitList(list, status);
                     }
                 });
             }
         }, "vpn-gate-nodes").start();
     }
+
+    private void renderExitList(final LinearLayout list, final TextView status) {
+        list.removeAllViews();
+        if (lastExitNodes.isEmpty()) {
+            status.setText("没有拿到节点：检查网络后重开此窗口");
+            return;
+        }
+        int ok = 0;
+        for (long[] result : probeResults.values()) {
+            if (result[0] == 1) {
+                ok++;
+            }
+        }
+        status.setText("共 " + lastExitNodes.size() + " 个节点"
+                + (probeResults.isEmpty() ? "（家宽优先，点一个即选定）"
+                : "，实测可握手 " + ok + " 个"));
+        int shown = Math.min(lastExitNodes.size(), 40);
+        for (int i = 0; i < shown; i++) {
+            final VpnGate.Node node = lastExitNodes.get(i);
+            StringBuilder text = new StringBuilder(node.label());
+            text.append('\n').append(node.host).append(':').append(node.port);
+            long[] probe = probeResults.get(node.id);
+            if (probe != null) {
+                text.append(probe[0] == 1 ? "   ✓ 握手 " + probe[1] + " ms" : "   ✗ 握手失败");
+            } else if (node.latencyMs > 0) {
+                text.append("   ·  ").append(node.latencyMs).append(" ms");
+            }
+            TextView row = new TextView(MainActivity.this);
+            row.setText(text.toString());
+            row.setTextColor(probe != null && probe[0] != 1 ? C_DANGER : C_TEXT);
+            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            row.setPadding(dp(4), dp(10), dp(4), dp(10));
+            row.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    selectExit(node);
+                }
+            });
+            list.addView(row);
+        }
+    }
+
+    private void selectExit(VpnGate.Node node) {
+        StringBuilder candidates = new StringBuilder(node.id);
+        int extra = 0;
+        for (VpnGate.Node other : lastExitNodes) {
+            if (extra >= 2) {
+                break;
+            }
+            if (other.id.equals(node.id)) {
+                continue;
+            }
+            long[] probe = probeResults.get(other.id);
+            if (probe != null && probe[0] == 1) {
+                candidates.append(',').append(other.id);
+                extra++;
+            }
+        }
+        prefs().edit()
+                .putString(KEY_EXIT_IDS, node.id)
+                .putString(KEY_EXIT_LABEL, node.country + " · " + node.classLabel())
+                .putString(KEY_EXIT_COUNTRY, node.cc)
+                .putString(KEY_EXIT_CANDIDATES, candidates.toString()).apply();
+        exitValue.setText(exitLabelText());
+        log("第二跳出口选定：" + node.country + " " + node.host + "（候选 " + candidates + "）");
+        toast("已选：" + node.country);
+    }
+
+    /** Real handshake test on the first candidates; re-sorts the list by result. */
+    private void probeNodes(final LinearLayout list, final TextView status) {
+        if (lastExitNodes.isEmpty()) {
+            toast("节点列表还没加载完");
+            return;
+        }
+        final java.util.List<VpnGate.Node> batch = new java.util.ArrayList<VpnGate.Node>();
+        for (int i = 0; i < Math.min(lastExitNodes.size(), 12); i++) {
+            batch.add(lastExitNodes.get(i));
+        }
+        StringBuilder ids = new StringBuilder();
+        for (VpnGate.Node node : batch) {
+            if (ids.length() > 0) {
+                ids.append(',');
+            }
+            ids.append(node.id);
+        }
+        status.setText("正在对 " + batch.size() + " 个节点做 OpenVPN 握手…");
+        new Thread(new Runnable() {
+            public void run() {
+                final String raw = EngineService.testVpnGateNodes(MainActivity.this, ids.toString());
+                ui.post(new Runnable() {
+                    public void run() {
+                        parseProbeResults(raw);
+                        // reachable nodes first, then the rest
+                        java.util.Collections.sort(lastExitNodes, new java.util.Comparator<VpnGate.Node>() {
+                            public int compare(VpnGate.Node a, VpnGate.Node b) {
+                                long[] pa = probeResults.get(a.id);
+                                long[] pb = probeResults.get(b.id);
+                                int sa = pa == null ? 1 : (pa[0] == 1 ? 0 : 2);
+                                int sb = pb == null ? 1 : (pb[0] == 1 ? 0 : 2);
+                                if (sa != sb) {
+                                    return sa - sb;
+                                }
+                                long ma = pa == null ? Long.MAX_VALUE : pa[1];
+                                long mb = pb == null ? Long.MAX_VALUE : pb[1];
+                                return Long.compare(ma, mb);
+                            }
+                        });
+                        renderExitList(list, status);
+                    }
+                });
+            }
+        }, "vpn-gate-probe").start();
+    }
+
+    private void parseProbeResults(String raw) {
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(raw);
+            org.json.JSONArray results = root.optJSONArray("results");
+            if (results == null) {
+                return;
+            }
+            for (int i = 0; i < results.length(); i++) {
+                org.json.JSONObject item = results.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                String id = item.optString("id", "");
+                boolean reachable = item.optBoolean("ok", false);
+                probeResults.put(id, new long[]{reachable ? 1 : 0, item.optInt("ms", 0)});
+            }
+        } catch (Exception ignored) {
+        }
+    }
+    private int handshakeTimeout() {
+        int[] values = {3, 5, 8};
+        int index = timeoutSpinner == null ? prefs().getInt(KEY_TIMEOUT, 1)
+                : timeoutSpinner.getSelectedItemPosition();
+        if (index < 0 || index >= values.length) {
+            index = 1;
+        }
+        prefs().edit().putInt(KEY_TIMEOUT, index).apply();
+        return values[index];
+    }
+
     private String upstreamProto() {
         int index = protoSpinner == null ? prefs().getInt(KEY_PROTO, 0) : protoSpinner.getSelectedItemPosition();
         if (index < 0 || index >= UPSTREAM_PROTOS.length) {
@@ -1261,7 +1417,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             public void run() {
                 EngineService.start(MainActivity.this, args[0], args[1], args[2],
                         "1".equals(args[3]), Integer.parseInt(args[4]), args[5],
-                        args[6], args[7], args[8]);
+                        exitIdsForConnect(), args[7], args[8], Integer.parseInt(args[9]));
                 engineRestartPending = false;
             }
         }, 800);
@@ -1286,7 +1442,15 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         return;
                     }
                     tick++;
-                    boolean healthy = checkHealthy(tick);
+                    if (lastEngine == 3 && (EngineService.needRecover
+                            || "error".equals(EngineService.state))) {
+                        log("看门狗：引擎判定出口已死（"
+                                + ("error".equals(EngineService.state) ? EngineService.message : "needRecover")
+                                + "），立即重连");
+                        EngineService.needRecover = false;
+                        failures = 3;
+                    }
+                    boolean healthy = failures >= 3 ? false : checkHealthy(tick);
                     failures = healthy ? 0 : failures + 1;
                     if (failures >= 3) {
                         failures = 0;
@@ -1967,6 +2131,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
+
 
 
 

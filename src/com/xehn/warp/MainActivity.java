@@ -139,6 +139,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private volatile boolean upstreamFallbackTried;
     private ConnectivityManager.NetworkCallback networkCallback;
     private boolean networkCallbackWarm;
+    private volatile long lastTransitionAt;
     private int recloseCount;
 
     private final Warp.Log logger = new Warp.Log() {
@@ -1379,7 +1380,22 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         networkCallbackWarm = true;
                         return;
                     }
-                    ui.postDelayed(networkReconnect, 2000);
+                    // Bringing the tunnel up changes the default network to the
+                    // VPN itself; treating that as "network switched" tore down
+                    // the tunnel we had just built.
+                    try {
+                        android.net.NetworkCapabilities caps = manager.getNetworkCapabilities(network);
+                        if (caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                            return;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    if (busy || engineRestartPending || lastTransitionAt > 0
+                            && System.currentTimeMillis() - lastTransitionAt < 5000) {
+                        return;
+                    }
+                    ui.removeCallbacks(networkReconnect);
+                    ui.postDelayed(networkReconnect, 2500);
                 }
             };
             manager.registerDefaultNetworkCallback(networkCallback);
@@ -1396,6 +1412,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             }
             log("网络已切换，自动重连…");
             connectionReady = false;
+            lastTransitionAt = System.currentTimeMillis();
             reconnectForNetwork();
         }
     };
@@ -1404,13 +1421,28 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         if (lastEngine == 3 && lastUpstreamArgs != null) {
             restartUpstreamEngine();
         } else if (lastEngine == 0 && !lastWgConfig.isEmpty()) {
-            applyUp(lastWgConfig);
+            // The old tunnel is usually still up; up() on a live backend throws
+            // BackendException, so always drop it first.
+            new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        TunnelManager.down();
+                    } catch (Throwable ignored) {
+                    }
+                    ui.post(new Runnable() {
+                        public void run() {
+                            applyUp(lastWgConfig);
+                        }
+                    });
+                }
+            }, "xehn-teardown").start();
         } else if (!lastMihomoYaml.isEmpty()) {
             startMihomoEngine(lastMihomoYaml);
         }
     }
 
     private void restartUpstreamEngine() {
+        lastTransitionAt = System.currentTimeMillis();
         final String[] args = lastUpstreamArgs;
         if (args == null) {
             return;
@@ -1707,6 +1739,15 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             public void run() {
                 try {
                     TunnelManager.attach(MainActivity.this, MainActivity.this);
+                    // up() on a live backend raises BackendException; make the
+                    // reconnect path idempotent.
+                    try {
+                        if (TunnelManager.state() == Tunnel.State.UP) {
+                            TunnelManager.down();
+                            Thread.sleep(300);
+                        }
+                    } catch (Throwable ignored) {
+                    }
                     TunnelManager.up(configText);
                     ui.post(new Runnable() {
                         public void run() {
@@ -2177,6 +2218,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
+
 
 
 

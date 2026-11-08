@@ -135,6 +135,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private String lastMihomoYaml = "";
     private volatile String[] lastUpstreamArgs;
     private volatile boolean engineRestartPending;
+    private volatile long upstreamConnectStart;
+    private volatile boolean upstreamFallbackTried;
     private ConnectivityManager.NetworkCallback networkCallback;
     private boolean networkCallbackWarm;
     private int recloseCount;
@@ -423,6 +425,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         int engineIndex = engineSpinner == null ? 0 : engineSpinner.getSelectedItemPosition();
         prefs().edit().putInt(KEY_ENGINE, engineIndex).apply();
         lastEngine = 3;
+        upstreamConnectStart = System.currentTimeMillis();
+        upstreamFallbackTried = false;
         log("上游引擎启动中…");
         lastUpstreamArgs = new String[]{
                 upstreamProto(), upstreamPolicy(), upstreamDns(),
@@ -1411,6 +1415,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         if (args == null) {
             return;
         }
+        upstreamConnectStart = System.currentTimeMillis();
         engineRestartPending = true;
         EngineService.stop(this);
         ui.postDelayed(new Runnable() {
@@ -1421,6 +1426,46 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 engineRestartPending = false;
             }
         }, 800);
+    }
+    /**
+     * A protocol that cannot dial (e.g. MASQUE on a network that resets TCP 500)
+     * would otherwise sit in "connecting" forever. After 30 seconds: fall back to
+     * plain WireGuard once, then give up honestly.
+     */
+    private void checkUpstreamConnectStall() {
+        if (lastEngine != 3 || !EngineService.running || EngineService.connected()) {
+            return;
+        }
+        if (upstreamConnectStart == 0) {
+            upstreamConnectStart = System.currentTimeMillis();
+            return;
+        }
+        long waitedMs = System.currentTimeMillis() - upstreamConnectStart;
+        if (waitedMs < 30000L) {
+            return;
+        }
+        if (!upstreamFallbackTried && lastUpstreamArgs != null
+                && !"wg".equals(lastUpstreamArgs[0])) {
+            upstreamFallbackTried = true;
+            final String failedProto = lastUpstreamArgs[0];
+            lastUpstreamArgs[0] = "wg";
+            upstreamConnectStart = System.currentTimeMillis();
+            log("连接超时：" + failedProto + " 30 秒未建立隧道，自动回退到 wg");
+            ui.post(new Runnable() {
+                public void run() {
+                    restartUpstreamEngine();
+                }
+            });
+            return;
+        }
+        log("连接超时：30 秒内未能建立隧道，已停止尝试（见上方引擎日志）");
+        connectionFailed = true;
+        ui.post(new Runnable() {
+            public void run() {
+                EngineService.stop(MainActivity.this);
+                render();
+            }
+        });
     }
     private void markReady() {
         connectionReady = true;
@@ -1442,6 +1487,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         return;
                     }
                     tick++;
+                    checkUpstreamConnectStall();
                     if (lastEngine == 3 && (EngineService.needRecover
                             || "error".equals(EngineService.state))) {
                         log("看门狗：引擎判定出口已死（"
@@ -2131,6 +2177,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 getResources().getDisplayMetrics());
     }
 }
+
 
 
 

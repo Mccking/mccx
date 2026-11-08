@@ -1,5 +1,9 @@
 package com.xehn.warp;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.net.VpnService;
@@ -47,6 +51,8 @@ public final class EngineService extends VpnService {
     public static final String EXTRA_EXIT_COUNTRY = "exit_country";
 
     private static final int DEFAULT_MTU = 1280;
+    private static final String CHANNEL_ID = "mccx-tunnel";
+    private static final int NOTIFICATION_ID = 1001;
     private static final long POLL_MS = 1000;
 
     public static volatile boolean running;
@@ -189,6 +195,7 @@ public final class EngineService extends VpnService {
             engine.setRules(policy, rules == null ? "" : rules);
             engine.connect(protoName, "", false, ipv6, mtu);
             running = true;
+            startForegroundWith("连接中…");
             refreshCnRoutesIfStale(policy);
             startPoller();
         } catch (Throwable t) {
@@ -346,6 +353,59 @@ public final class EngineService extends VpnService {
         }, "cn-routes").start();
     }
 
+    private void startForegroundWith(String text) {
+        try {
+            NotificationManager manager =
+                    (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "隧道状态",
+                        NotificationManager.IMPORTANCE_LOW);
+                channel.setShowBadge(false);
+                manager.createNotificationChannel(channel);
+            }
+            Intent open = new Intent(this, MainActivity.class);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent content = PendingIntent.getActivity(this, 0, open, flags);
+
+            Intent stopIntent = new Intent(this, EngineService.class).setAction(ACTION_STOP);
+            PendingIntent stopAction = PendingIntent.getService(this, 1, stopIntent, flags);
+
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? new Notification.Builder(this, CHANNEL_ID)
+                    : new Notification.Builder(this);
+            builder.setContentTitle("MccX")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setOngoing(true)
+                    .setContentIntent(content)
+                    .addAction(new Notification.Action.Builder(
+                            android.R.drawable.ic_menu_close_clear_cancel, "断开", stopAction).build());
+            startForeground(NOTIFICATION_ID, builder.build());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void updateNotification(String text) {
+        try {
+            NotificationManager manager =
+                    (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager == null) {
+                return;
+            }
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? new Notification.Builder(this, CHANNEL_ID)
+                    : new Notification.Builder(this);
+            builder.setContentTitle("MccX")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setOngoing(true);
+            manager.notify(NOTIFICATION_ID, builder.build());
+        } catch (Throwable ignored) {
+        }
+    }
     private void startPoller() {
         poller = new Thread(new Runnable() {
             public void run() {
@@ -365,6 +425,14 @@ public final class EngineService extends VpnService {
                             previous = state;
                             remember("状态：" + state
                                     + (message.isEmpty() ? "" : "（" + message + "）"));
+                            final String label = "connected".equals(state)
+                                    ? (country.isEmpty() ? "已连接" : "已连接 · " + country + " " + exitIP)
+                                    : ("connecting".equals(state) ? "连接中…" : state);
+                            uiPost(new Runnable() {
+                                public void run() {
+                                    updateNotification(label);
+                                }
+                            });
                             if ("connected".equals(state)) {
                                 running = true;
                             }
@@ -399,6 +467,13 @@ public final class EngineService extends VpnService {
         }
     }
 
+    private void uiPost(Runnable action) {
+        try {
+            android.os.Handler handler = new android.os.Handler(getMainLooper());
+            handler.post(action);
+        } catch (Throwable ignored) {
+        }
+    }
     private void stopTunnel() {
         stopped = true;
         running = false;
@@ -419,6 +494,7 @@ public final class EngineService extends VpnService {
             }
             tun = null;
         }
+        stopForeground(true);
         stopSelf();
     }
 
@@ -495,5 +571,7 @@ public final class EngineService extends VpnService {
         context.startService(new Intent(context, EngineService.class).setAction(ACTION_STOP));
     }
 }
+
+
 
 

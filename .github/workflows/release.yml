@@ -56,8 +56,10 @@ jobs:
           Write-Host "upstream drift: $changed"
           "changed=$($changed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
           if ($changed) {
-            $sha = (Select-String -Path src/com/xehn/warp/UpstreamDefaults.java -Pattern 'UPSTREAM_COMMIT = "([0-9a-f]+)"').Matches[0].Groups[1].Value
-            "commit=$sha" >> $env:GITHUB_OUTPUT
+            # Upstream does not always expose a commit (codeload zip has no .git),
+            # so a missing match must not fail the job.
+            $m = Select-String -Path src/com/xehn/warp/UpstreamDefaults.java -Pattern 'UPSTREAM_COMMIT = "([0-9a-f]+)"'
+            if ($m) { "commit=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT }
           }
 
       - name: Resolve version

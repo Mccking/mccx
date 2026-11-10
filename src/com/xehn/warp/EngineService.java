@@ -353,6 +353,18 @@ public final class EngineService extends VpnService {
         }, "cn-routes").start();
     }
 
+    /** The app's own monochrome mark, with a system fallback if it is missing. */
+    private int notificationIcon() {
+        try {
+            int id = getResources().getIdentifier("ic_stat_mccx", "drawable", getPackageName());
+            if (id != 0) {
+                return id;
+            }
+        } catch (Throwable ignored) {
+        }
+        return android.R.drawable.ic_lock_lock;
+    }
+
     private void startForegroundWith(String text) {
         try {
             NotificationManager manager =
@@ -378,7 +390,7 @@ public final class EngineService extends VpnService {
                     : new Notification.Builder(this);
             builder.setContentTitle("MccX")
                     .setContentText(text)
-                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setSmallIcon(notificationIcon())
                     .setOngoing(true)
                     .setContentIntent(content)
                     .addAction(new Notification.Action.Builder(
@@ -400,7 +412,7 @@ public final class EngineService extends VpnService {
                     : new Notification.Builder(this);
             builder.setContentTitle("MccX")
                     .setContentText(text)
-                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setSmallIcon(notificationIcon())
                     .setOngoing(true);
             manager.notify(NOTIFICATION_ID, builder.build());
         } catch (Throwable ignored) {

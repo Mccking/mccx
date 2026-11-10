@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_connect">连接</string>
+    <string name="shortcut_disconnect">断开</string>
+    <string name="tile_label">MccX</string>
+</resources>

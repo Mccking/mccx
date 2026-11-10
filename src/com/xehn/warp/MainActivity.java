@@ -51,6 +51,10 @@ import com.wireguard.android.backend.Tunnel;
 public final class MainActivity extends Activity implements WarpTunnel.Listener {
 
     private static final int REQ_VPN = 1001;
+
+    /** Launcher shortcut / quick-settings tile entry points. */
+    public static final String ACTION_CONNECT = "com.xehn.warp.CONNECT";
+    public static final String ACTION_DISCONNECT = "com.xehn.warp.DISCONNECT";
     private static final String PREFS = "xehn";
     private static final String KEY_ACCOUNT = "account";
     private static final String KEY_PORT = "port_index";
@@ -164,6 +168,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         // on the UI thread would make the first frame stutter.
         render();
         autoCheckUpdate();
+        handleLaunchIntent(getIntent());
     }
 
     /** Silent launch-time check; only logs when there is something newer. */
@@ -190,6 +195,48 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         super.onConfigurationChanged(config);
         // Rebuild with the other palette instead of mutating every view.
         recreate();
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleLaunchIntent(intent);
+    }
+
+    /** Runs 连接 / 断开 when the app was opened from a shortcut or the tile. */
+    private void handleLaunchIntent(android.content.Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        String action = intent.getAction();
+        if (!ACTION_CONNECT.equals(action) && !ACTION_DISCONNECT.equals(action)) {
+            return;
+        }
+        intent.setAction(null);
+        final boolean wantConnect = ACTION_CONNECT.equals(action);
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                if (wantConnect) {
+                    if (isTunnelUp()) {
+                        toast("已经连接");
+                    } else {
+                        onConnectClicked();
+                    }
+                } else {
+                    if (isTunnelUp()) {
+                        onConnectClicked();
+                    } else {
+                        toast("当前未连接");
+                    }
+                }
+            }
+        }, 450);
+    }
+
+    private boolean isTunnelUp() {
+        return MihomoVpnService.running || EngineService.running
+                || TunnelManager.state() == Tunnel.State.UP;
     }
 
     @Override

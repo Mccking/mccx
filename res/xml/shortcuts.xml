@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="connect"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_connect"
+        android:shortcutLongLabel="@string/shortcut_connect">
+        <intent
+            android:action="com.xehn.warp.CONNECT"
+            android:targetPackage="com.xehn.warp"
+            android:targetClass="com.xehn.warp.MainActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="disconnect"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_disconnect"
+        android:shortcutLongLabel="@string/shortcut_disconnect">
+        <intent
+            android:action="com.xehn.warp.DISCONNECT"
+            android:targetPackage="com.xehn.warp"
+            android:targetClass="com.xehn.warp.MainActivity" />
+    </shortcut>
+</shortcuts>

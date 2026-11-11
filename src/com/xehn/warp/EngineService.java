@@ -106,6 +106,21 @@ public final class EngineService extends VpnService {
     private Thread poller;
     private volatile boolean stopped;
 
+    // Last successful configuration: the service restarts itself from these when
+    // the engine reports a dead session, so recovery works with no UI attached.
+    private String cfgProto = "wg";
+    private String cfgPolicy = "global";
+    private String cfgDns;
+    private boolean cfgIpv6;
+    private int cfgMtu = DEFAULT_MTU;
+    private String cfgRules;
+    private String cfgExitIds;
+    private String cfgExitLabel;
+    private String cfgExitCountry;
+    private int cfgTimeout = 5;
+    private int recoverAttempts;
+    private long recoverWindowStart;
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
@@ -131,6 +146,16 @@ public final class EngineService extends VpnService {
     private void startTunnel(String protoName, String policy, String dns, boolean ipv6, int mtu,
                              String rules, String exitIds, String exitLabel, String exitCountry,
                              int timeoutSec) {
+        cfgProto = protoName;
+        cfgPolicy = policy;
+        cfgDns = dns;
+        cfgIpv6 = ipv6;
+        cfgMtu = mtu;
+        cfgRules = rules;
+        cfgExitIds = exitIds;
+        cfgExitLabel = exitLabel;
+        cfgExitCountry = exitCountry;
+        cfgTimeout = timeoutSec;
         try {
             File dir = new File(getFilesDir(), "engine");
             if (!dir.exists() && !dir.mkdirs()) {
@@ -422,6 +447,7 @@ public final class EngineService extends VpnService {
         poller = new Thread(new Runnable() {
             public void run() {
                 String previous = "";
+                int ticks = 0;
                 while (!stopped) {
                     try {
                         Thread.sleep(POLL_MS);
@@ -433,6 +459,21 @@ public final class EngineService extends VpnService {
                     }
                     try {
                         applyStatus(engine.statusJSON());
+                        ticks++;
+                        if ("connected".equals(state) && ticks % 2 == 0) {
+                            final String label = (country.isEmpty() ? "已连接" : "已连接 · " + country + " " + exitIP)
+                                    + "  ↑" + rate(upBps) + " ↓" + rate(downBps);
+                            uiPost(new Runnable() {
+                                public void run() {
+                                    updateNotification(label);
+                                }
+                            });
+                        }
+                        if ("error".equals(state) || needRecover) {
+                            needRecover = false;
+                            tryRecover();
+                            return;
+                        }
                         if (!state.equals(previous)) {
                             previous = state;
                             remember("状态：" + state
@@ -458,6 +499,16 @@ public final class EngineService extends VpnService {
     }
 
     /** Mirrors the engine snapshot into the static fields the UI reads. */
+    private static String rate(long bps) {
+        if (bps < 1024) {
+            return bps + "B/s";
+        }
+        if (bps < 1024 * 1024) {
+            return (bps / 1024) + "KB/s";
+        }
+        return String.format(java.util.Locale.US, "%.1fMB/s", bps / 1048576.0);
+    }
+
     private static void applyStatus(String json) {
         try {
             JSONObject o = new JSONObject(json);
@@ -486,6 +537,56 @@ public final class EngineService extends VpnService {
         } catch (Throwable ignored) {
         }
     }
+    /**
+     * Restarts the tunnel after the engine reports a dead session. Capped at
+     * three attempts per five minutes: an unrecoverable link should stop, not
+     * spin and drain the battery.
+     */
+    private void tryRecover() {
+        long now = System.currentTimeMillis();
+        if (recoverWindowStart == 0 || now - recoverWindowStart > 5 * 60 * 1000L) {
+            recoverWindowStart = now;
+            recoverAttempts = 0;
+        }
+        if (recoverAttempts >= 3) {
+            remember("自动重连已达上限（5 分钟 3 次），停止重试");
+            state = "error";
+            return;
+        }
+        recoverAttempts++;
+        remember("引擎判定出口已死，自动重连（第 " + recoverAttempts + " 次）");
+        teardown();
+        try {
+            Thread.sleep(700);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        startTunnel(cfgProto, cfgPolicy, cfgDns, cfgIpv6, cfgMtu, cfgRules,
+                cfgExitIds, cfgExitLabel, cfgExitCountry, cfgTimeout);
+    }
+
+    /** Drops the engine and the tun but keeps the service alive. */
+    private void teardown() {
+        try {
+            if (engine != null) {
+                engine.setVPNState(false);
+                engine.disconnect();
+            }
+        } catch (Throwable ignored) {
+        }
+        engine = null;
+        if (tun != null) {
+            try {
+                tun.close();
+            } catch (IOException ignored) {
+            }
+            tun = null;
+        }
+        running = false;
+        state = "connecting";
+    }
+
     private void stopTunnel() {
         stopped = true;
         running = false;

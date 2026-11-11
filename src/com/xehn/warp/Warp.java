@@ -51,7 +51,7 @@ public final class Warp {
     private static final int PROBE_TIMEOUT_MS = 900;
     private static final int PROBE_THREADS = 16;
     /** Finalists that get a real download before the endpoint is chosen. */
-    private static final int SPEED_PROBE_COUNT = 2;
+    private static final int SPEED_PROBE_COUNT = 4;
     private static final int SPEED_PROBE_BYTES = 512 * 1024;
     private static final long SPEED_PROBE_DEADLINE_MS = 2500;
 
@@ -307,7 +307,7 @@ public final class Warp {
 
     // -------------------------------------------------------------- ranking
 
-    private static final class Probe {
+    public static final class Probe {
         final String ip;
         final long millis;
         long bytesPerSecond;
@@ -323,7 +323,7 @@ public final class Warp {
      * list down, then a real download through each finalist. A 20 ms edge that
      * pushes 200 KB/s is worse than a 60 ms edge that pushes 8 MB/s.
      */
-    private static Probe rankEndpoints(Log log) throws InterruptedException {
+    public static Probe rankEndpoints(Log log) throws InterruptedException {
         List<Probe> alive = new ArrayList<Probe>();
         ExecutorService pool = Executors.newFixedThreadPool(PROBE_THREADS);
         List<Future<Probe>> futures = new ArrayList<Future<Probe>>();
@@ -363,11 +363,37 @@ public final class Warp {
             }
         });
 
+        // Measure the finalists in parallel: four sequential 2.5 s samples turned
+        // a 6 s connect into a 12 s connect.
         int finalists = Math.min(SPEED_PROBE_COUNT, alive.size());
+        List<Probe> shortlist = new ArrayList<Probe>(alive.subList(0, finalists));
+        ExecutorService speedPool = Executors.newFixedThreadPool(finalists);
+        List<Future<Long>> speedFutures = new ArrayList<Future<Long>>();
+        try {
+            for (final Probe candidate : shortlist) {
+                speedFutures.add(speedPool.submit(new Callable<Long>() {
+                    public Long call() {
+                        return measureThroughput(candidate.ip);
+                    }
+                }));
+            }
+            speedPool.shutdown();
+            speedPool.awaitTermination(SPEED_PROBE_DEADLINE_MS * 2L, TimeUnit.MILLISECONDS);
+        } finally {
+            speedPool.shutdownNow();
+        }
+
         Probe best = null;
-        for (int i = 0; i < finalists; i++) {
-            Probe candidate = alive.get(i);
-            candidate.bytesPerSecond = measureThroughput(candidate.ip);
+        for (int i = 0; i < shortlist.size(); i++) {
+            Probe candidate = shortlist.get(i);
+            try {
+                Future<Long> future = speedFutures.get(i);
+                if (future.isDone() && !future.isCancelled()) {
+                    Long value = future.get();
+                    candidate.bytesPerSecond = value == null ? 0 : value;
+                }
+            } catch (Exception ignored) {
+            }
             log.log(String.format(java.util.Locale.US, "候选 %s  %d ms  %.1f MB/s",
                     candidate.ip, candidate.millis, candidate.bytesPerSecond / 1048576.0));
             if (best == null || candidate.bytesPerSecond > best.bytesPerSecond) {
@@ -382,7 +408,7 @@ public final class Warp {
     }
 
     /** One download through a pinned edge, so the measurement is real traffic. */
-    private static long measureThroughput(final String ip) {
+    public static long measureThroughput(final String ip) {
         Dns pinned = new Dns() {
             public List<InetAddress> lookup(String hostname) throws UnknownHostException {
                 return Collections.singletonList(InetAddress.getByName(ip));

@@ -24,6 +24,10 @@ public final class LogStore {
     private static final long MAX_BYTES = 512 * 1024;
     private static final Object LOCK = new Object();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor();
+    /** Lines are batched: one open/write/close per line stalls under engine spam. */
+    private static final StringBuilder PENDING = new StringBuilder();
+    private static final long FLUSH_MS = 800;
+    private static long lastFlush;
     private static final SimpleDateFormat TIME =
             new SimpleDateFormat("MM-dd HH:mm:ss", Locale.US);
 
@@ -51,14 +55,51 @@ public final class LogStore {
         if (current == null) {
             return;
         }
+        synchronized (LOCK) {
+            PENDING.append(TIME.format(new Date())).append(' ').append(line).append('\n');
+            long now = System.currentTimeMillis();
+            if (PENDING.length() >= 8192 || now - lastFlush >= FLUSH_MS) {
+                flushLocked();
+                lastFlush = now;
+            }
+        }
+    }
+
+    /** Writes whatever is buffered; called on shutdown and before sharing. */
+    public static void flush() {
+        synchronized (LOCK) {
+            flushLocked();
+        }
+    }
+
+    private static void flushLocked() {
+        if (PENDING.length() == 0 || current == null) {
+            return;
+        }
+        final String chunk = PENDING.toString();
+        PENDING.setLength(0);
         WRITER.execute(new Runnable() {
             public void run() {
-                write(line);
+                write(chunk);
             }
         });
     }
 
-    private static void write(String line) {
+    public static void clear() {
+        synchronized (LOCK) {
+            PENDING.setLength(0);
+        }
+        if (current != null) {
+            // keep the file handle valid: truncate instead of deleting
+            try {
+                java.io.FileOutputStream out = new java.io.FileOutputStream(current, false);
+                out.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private static void write(String chunk) {
         synchronized (LOCK) {
             try {
                 if (current.length() > MAX_BYTES) {
@@ -73,10 +114,7 @@ public final class LogStore {
                 FileOutputStream out = new FileOutputStream(current, true);
                 try {
                     OutputStreamWriter writer = new OutputStreamWriter(out, "UTF-8");
-                    writer.write(TIME.format(new Date()));
-                    writer.write(' ');
-                    writer.write(line);
-                    writer.write('\n');
+                    writer.write(chunk);
                     writer.flush();
                 } finally {
                     out.close();

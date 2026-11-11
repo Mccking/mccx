@@ -57,6 +57,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     public static final String ACTION_DISCONNECT = "com.xehn.warp.DISCONNECT";
     static final String PREFS = "xehn";
     static final String KEY_ACCOUNT = "account";
+    static final String KEY_ENDPOINT_CACHE = "endpoint_cache";
     static final String KEY_PORT = "port_index";
     private static final String KEY_MASQUE = "masque_account";
     private static final String KEY_MASQUE_ENDPOINT = "masque_endpoint";
@@ -102,6 +103,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private Spinner timeoutSpinner;
     private final java.util.Map<String, long[]> probeResults = new java.util.HashMap<String, long[]>();
     private TextView exitValue;
+    private TextView chipLatency;
+    private TextView chipExit;
+    private TextView chipUptime;
+    private long connectStartAt;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
     private int pendingEngine;
@@ -137,7 +142,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private int lastEngine;
     private String lastWgConfig = "";
     private Warp.Result lastWgResult;
-    private String lastMihomoYaml = "";
     private volatile String[] lastUpstreamArgs;
     private volatile boolean engineRestartPending;
     private volatile long upstreamConnectStart;
@@ -158,6 +162,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         super.onCreate(state);
         applyPalette();
         LogStore.init(this);
+        migratePrefs();
         registerNetworkCallback();
         try {
             getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(C_BG));
@@ -170,6 +175,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         render();
         autoCheckUpdate();
         handleLaunchIntent(getIntent());
+        prewarmEndpoint();
     }
 
     /** Silent launch-time check; only logs when there is something newer. */
@@ -196,6 +202,22 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         super.onConfigurationChanged(config);
         // Rebuild with the other palette instead of mutating every view.
         recreate();
+    }
+
+    @Override
+    protected void onDestroy() {
+        try {
+            ConnectivityManager manager =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager != null && networkCallback != null) {
+                manager.unregisterNetworkCallback(networkCallback);
+            }
+        } catch (Throwable ignored) {
+        }
+        if (ui != null) {
+            ui.removeCallbacksAndMessages(null);
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -236,8 +258,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     private boolean isTunnelUp() {
-        return MihomoVpnService.running || EngineService.running
-                || TunnelManager.state() == Tunnel.State.UP;
+        return EngineService.running || TunnelManager.state() == Tunnel.State.UP;
     }
 
     @Override
@@ -262,6 +283,24 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private int C_WARN;
     private int C_DANGER;
     private int C_LOG;
+
+    private static final int PREFS_SCHEMA = 2;
+
+    /** One-time defaults for keys added after the first release. */
+    private void migratePrefs() {
+        int schema = prefs().getInt("prefs_schema", 1);
+        if (schema >= PREFS_SCHEMA) {
+            return;
+        }
+        if (!prefs().contains(KEY_TIMEOUT)) {
+            prefs().edit().putInt(KEY_TIMEOUT, 1).apply();
+        }
+        if (!prefs().contains(KEY_ENGINE)) {
+            prefs().edit().putInt(KEY_ENGINE, 0).apply();
+        }
+        prefs().edit().putInt("prefs_schema", PREFS_SCHEMA).apply();
+        LogStore.append("设置已迁移到 schema " + PREFS_SCHEMA);
+    }
 
     private void applyPalette() {
         boolean dark = (getResources().getConfiguration().uiMode
@@ -361,6 +400,19 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         detailLp.topMargin = dp(6);
         card.addView(detailView, detailLp);
 
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams chipsLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        chipsLp.topMargin = dp(14);
+        chipLatency = statChip("延迟 —");
+        chipExit = statChip("出口 —");
+        chipUptime = statChip("时长 00:00:00");
+        chips.addView(chipLatency, chipParams());
+        chips.addView(chipExit, chipParams());
+        chips.addView(chipUptime, chipParams());
+        card.addView(chips, chipsLp);
+
         connectButton = new Button(this);
         connectButton.setAllCaps(false);
         connectButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
@@ -375,6 +427,28 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         buttonLp.topMargin = dp(16);
         card.addView(connectButton, buttonLp);
         return card;
+    }
+
+    private TextView statChip(String text) {
+        TextView chip = new TextView(this);
+        chip.setText(text);
+        chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        chip.setTextColor(C_MUTED);
+        chip.setGravity(android.view.Gravity.CENTER);
+        chip.setPadding(dp(8), dp(8), dp(8), dp(8));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(C_BG);
+        bg.setCornerRadius(dp(10));
+        bg.setStroke(dp(1), C_BORDER);
+        chip.setBackground(bg);
+        return chip;
+    }
+
+    private LinearLayout.LayoutParams chipParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(3), 0, dp(3), 0);
+        return lp;
     }
 
     private View buildSettingsCard() {
@@ -587,6 +661,22 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         });
         head.addView(share);
 
+        TextView clear = new TextView(this);
+        clear.setText("清空");
+        clear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        clear.setTextColor(C_MUTED);
+        clear.setPadding(dp(12), dp(4), dp(4), dp(4));
+        clear.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                logLines.setLength(0);
+                LogStore.clear();
+                if (logView != null) {
+                    logView.setText("");
+                }
+            }
+        });
+        head.addView(clear);
+
         TextView copy = new TextView(this);
         copy.setText("复制");
         copy.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
@@ -643,7 +733,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         LinearLayout second = actionRow(
                 actionButton("测试内核", new View.OnClickListener() {
                     public void onClick(View v) {
-                        probeMihomo();
+                        probeDiagnostics();
                     }
                 }),
                 actionButton("检查更新", new View.OnClickListener() {
@@ -703,10 +793,11 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private TextView cardTitle(String text) {
         TextView title = new TextView(this);
         title.setText(text);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         title.setTextColor(C_MUTED);
+        title.setLetterSpacing(0.12f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, 0, 0, dp(4));
+        title.setPadding(0, 0, 0, dp(8));
         return title;
     }
 
@@ -714,14 +805,15 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(8), 0, dp(8));
+        row.setPadding(0, dp(6), 0, dp(6));
+        row.setMinimumHeight(dp(46));
 
         TextView name = new TextView(this);
         name.setText(label);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         name.setTextColor(C_TEXT);
         row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(control, new LinearLayout.LayoutParams(dp(152), dp(40)));
+        row.addView(control, new LinearLayout.LayoutParams(dp(156), dp(40)));
         return row;
     }
 
@@ -772,7 +864,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
     }
     private void render() {
-        boolean up = MihomoVpnService.running || EngineService.running || TunnelManager.state() == Tunnel.State.UP;
+        boolean up = EngineService.running || TunnelManager.state() == Tunnel.State.UP;
         boolean upstream = lastEngine == 3 && EngineService.running;
         if (!busy && upstream && EngineService.connected()) {
             statusView.setText("已连接");
@@ -851,6 +943,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             detail.append("点击连接：自动注册 WARP、优选节点、建立隧道");
         }
         detailView.setText(detail.toString());
+        updateStatChips(upstream);
         scheduleUiTick(upstream);
 
         logView.setText(logLines.toString());
@@ -865,7 +958,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         // Must use the same definition of "up" the status line uses: in the
         // engine modes the tunnel is not registered in the WireGuard backend,
         // so checking TunnelManager alone made "断开" start a new connection.
-        boolean up = MihomoVpnService.running || EngineService.running || TunnelManager.state() == Tunnel.State.UP;
+        boolean up = EngineService.running || TunnelManager.state() == Tunnel.State.UP;
         if (up) {
             startDisconnect();
         } else {
@@ -958,6 +1051,50 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     }
 
     /** Real requests through the tunnel: exit IP, reachability and round trips. */
+    private static final String MASQUE_SNI = "consumer-masque.cloudflareclient.com";
+    private static final String MASQUE_HOST = "162.159.198.2";
+    private static final int MASQUE_PORT = 443;
+
+    /** Everything needed to explain a failure: versions, state, TLS reachability. */
+    private void probeDiagnostics() {
+        log("诊断信息…");
+        new Thread(new Runnable() {
+            public void run() {
+                StringBuilder report = new StringBuilder();
+                report.append("App ").append(versionName()).append("（").append(Updater.currentVersionCode(MainActivity.this)).append("）\n");
+                report.append("引擎：").append(lastEngine == 3 ? "上游引擎" : "内置 WireGuard").append('\n');
+                report.append("状态：").append(lastEngine == 3 ? EngineService.state : String.valueOf(TunnelManager.state())).append('\n');
+                report.append("端点：").append(lastEndpoint.isEmpty() ? "未连接" : lastEndpoint).append('\n');
+                report.append("\n—— MASQUE 端点 TLS 探测（对照）——\n");
+                report.append(TlsProbe.run(MASQUE_HOST, MASQUE_PORT, MASQUE_SNI));
+                report.append('\n');
+                report.append(TlsProbe.run(MASQUE_HOST, MASQUE_PORT, "cloudflare.com"));
+                postDiagnostics(report.toString());
+            }
+        }, "probe-diagnostics").start();
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    private void postDiagnostics(final String report) {
+        ui.post(new Runnable() {
+            public void run() {
+                log(report.trim());
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("诊断信息")
+                        .setMessage(report)
+                        .setPositiveButton("好", null)
+                        .show();
+            }
+        });
+    }
+
     private void runExitCheck() {
         if (!isTunnelUp()) {
             toast("请先连接");
@@ -979,6 +1116,79 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 });
             }
         }, "exit-check").start();
+    }
+
+    private static final long ENDPOINT_CACHE_MS = 10 * 60 * 1000L;
+
+    /** Background endpoint scan, cached so "连接" can skip the scan entirely. */
+    private static String endpointHostOf(Warp.Result result) {
+        if (result == null || result.endpoint == null) {
+            return "";
+        }
+        int split = result.endpoint.lastIndexOf(':');
+        return split > 0 ? result.endpoint.substring(0, split) : result.endpoint;
+    }
+
+    private void prewarmEndpoint() {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    if (cachedEndpointFresh()) {
+                        return;
+                    }
+                    Warp.Probe best = Warp.rankEndpoints(new Warp.Log() {
+                        public void log(String line) {
+                            LogStore.append(line);
+                        }
+                    });
+                    if (best != null && best.bytesPerSecond > 0) {
+                        cacheEndpoint(best.ip, best.millis, best.bytesPerSecond);
+                        ui.post(new Runnable() {
+                            public void run() {
+                                log("已预热端点（下次连接直接使用）");
+                            }
+                        });
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }, "prewarm-endpoint").start();
+    }
+
+    private boolean cachedEndpointFresh() {
+        String raw = prefs().getString(KEY_ENDPOINT_CACHE, "");
+        if (raw.isEmpty()) {
+            return false;
+        }
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(raw);
+            return System.currentTimeMillis() - o.optLong("ts", 0) < ENDPOINT_CACHE_MS
+                    && !o.optString("ip", "").isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String cachedEndpoint() {
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(prefs().getString(KEY_ENDPOINT_CACHE, ""));
+            String ip = o.optString("ip", "");
+            return ip.isEmpty() ? "" : ip;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void cacheEndpoint(String ip, long latencyMs, long bytesPerSecond) {
+        try {
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("ip", ip);
+            o.put("latency", latencyMs);
+            o.put("bps", bytesPerSecond);
+            o.put("ts", System.currentTimeMillis());
+            prefs().edit().putString(KEY_ENDPOINT_CACHE, o.toString()).apply();
+        } catch (Exception ignored) {
+        }
     }
 
     private void startConnect() {
@@ -1004,7 +1214,21 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             public void run() {
                 try {
                     Warp.Account existing = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
-                    Warp.Result result = Warp.generate("wg", port, true, existing, logger);
+                    Warp.Result result = null;
+                    String cached = cachedEndpointFresh() ? cachedEndpoint() : "";
+                    if (!cached.isEmpty()) {
+                        log("使用预热端点 " + cached);
+                        try {
+                            result = Warp.generateFixed("wg", cached + ":" + port, existing, logger);
+                        } catch (Exception e) {
+                            log("预热端点失败，改为全量扫描");
+                            result = null;
+                        }
+                    }
+                    if (result == null) {
+                        result = Warp.generate("wg", port, true, existing, logger);
+                        cacheEndpoint(endpointHostOf(result), result.latencyMs, 0);
+                    }
                     prefs().edit()
                             .putString(KEY_ACCOUNT, result.account.toJson())
                             .putInt(KEY_PORT, portIndex)
@@ -1304,110 +1528,14 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             applyUp(configText);
             return;
         }
-        if (engine == 2) {
-            startMasqueEngine();
-            return;
-        }
         if (engine == 3) {
             connectUpstream();
             return;
         }
-        try {
-            int split = result.endpoint.lastIndexOf(':');
-            String host = result.endpoint.substring(0, split);
-            int port = Integer.parseInt(result.endpoint.substring(split + 1));
-            lastMihomoYaml = MihomoConfig.build(result.account, host, port, false, false);
-            startMihomoEngine(lastMihomoYaml);
-        } catch (Exception e) {
-            fail(e);
-        }
     }
 
-    private void startMihomoEngine(String yaml) {
-        try {
-            MihomoVpnService.start(this, yaml);
-            log("mihomo 内核启动中…");
-            scheduleEngineCheck();
-        } catch (Exception e) {
-            fail(e);
-        }
-    }
-
-    private final Masque.Log masqueLogger = new Masque.Log() {
-        public void log(String line) {
-            appendLog(line);
-        }
-    };
-
-    /** MASQUE does not use the WireGuard device; it registers its own EC identity. */
-    private void startMasqueEngine() {
-        busy = true;
-        render();
-        log("准备 MASQUE 设备…");
-        new Thread(new Runnable() {
-            public void run() {
-                try {
-                    Masque.Account account = Masque.Account.fromJson(prefs().getString(KEY_MASQUE, ""));
-                    if (account == null) {
-                        log("注册 MASQUE 设备（EC P-256）…");
-                        account = Masque.register();
-                        prefs().edit().putString(KEY_MASQUE, account.toJson()).apply();
-                    } else {
-                        log("复用 MASQUE 设备 " + account.ipv4);
-                    }
-                    log("探测 MASQUE 端点（TCP）…");
-                    Masque.Endpoint endpoint = null;
-                    String cached = prefs().getString(KEY_MASQUE_ENDPOINT, "");
-                    if (!cached.isEmpty()) {
-                        try {
-                            int split = cached.lastIndexOf(':');
-                            Masque.Endpoint probe = new Masque.Endpoint(
-                                    cached.substring(0, split), Integer.parseInt(cached.substring(split + 1)));
-                            if (Masque.reachable(probe)) {
-                                endpoint = probe;
-                                log("复用端点 " + cached);
-                            }
-                        } catch (Exception ignored) {
-                        }
-                    }
-                    if (endpoint == null) {
-                        endpoint = Masque.pickEndpoint(masqueLogger);
-                    }
-                    if (endpoint == null) {
-                        connectionFailed = true;
-                        log("所有 MASQUE 端点都不可达：当前网络没有可用的 TCP 出口");
-                        ui.post(new Runnable() {
-                            public void run() {
-                                busy = false;
-                                render();
-                            }
-                        });
-                        return;
-                    }
-                    prefs().edit().putString(KEY_MASQUE_ENDPOINT, endpoint.label()).apply();
-
-                    final String yaml = MihomoConfig.buildMasque(account, endpoint.host, endpoint.port);
-                    ui.post(new Runnable() {
-                        public void run() {
-                            try {
-                                lastEngine = 2;
-                                lastMihomoYaml = yaml;
-                                MihomoVpnService.start(MainActivity.this, yaml);
-                                log("mihomo(MASQUE) 启动中…");
-                                scheduleEngineCheck();
-                            } catch (Exception e) {
-                                fail(e);
-                            }
-                        }
-                    });
-                } catch (final Exception e) {
-                    fail(e);
-                }
-            }
-        }, "mccx-masque").start();
-    }
-
-    private void scheduleEngineCheck() {
+        /** MASQUE does not use the WireGuard device; it registers its own EC identity. */
+        private void scheduleEngineCheck() {
         ui.postDelayed(new Runnable() {
             public void run() {
                 busy = false;
@@ -1420,24 +1548,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     }
                     if (EngineService.running) {
                         markReady();
-                    }
-                    render();
-                    return;
-                }
-                if (MihomoVpnService.running) {
-                    log("mihomo 已接管隧道");
-                    String tail = MihomoVpnService.recentLog();
-                    if (!tail.isEmpty()) {
-                        log("—— 内核输出 ——");
-                        log(tail);
-                    }
-                    startMihomoCheck();
-                } else {
-                    log("mihomo 未启动：" + MihomoVpnService.lastLog);
-                    String engineLog = MihomoVpnService.recentLog();
-                    if (!engineLog.isEmpty()) {
-                        log("—— 内核输出 ——");
-                        log(engineLog);
                     }
                 }
                 render();
@@ -1557,8 +1667,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
 
     private final Runnable networkReconnect = new Runnable() {
         public void run() {
-            boolean up = EngineService.running || MihomoVpnService.running
-                    || TunnelManager.state() == Tunnel.State.UP;
+            boolean up = EngineService.running || TunnelManager.state() == Tunnel.State.UP;
             if (!up || busy || userDown || engineRestartPending) {
                 return;
             }
@@ -1588,8 +1697,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     });
                 }
             }, "xehn-teardown").start();
-        } else if (!lastMihomoYaml.isEmpty()) {
-            startMihomoEngine(lastMihomoYaml);
         }
     }
 
@@ -1651,7 +1758,38 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             }
         });
     }
+    /** Honest numbers only: an unknown value shows as a dash, never as zero. */
+    private void updateStatChips(boolean upstream) {
+        if (chipLatency == null) {
+            return;
+        }
+        long latency = lastLatency;
+        if (upstream && EngineService.latencyMs > 0) {
+            latency = EngineService.latencyMs;
+        }
+        chipLatency.setText(latency >= 0 ? "延迟 " + latency + " ms" : "延迟 —");
+
+        String exit = "";
+        if (upstream) {
+            if (!EngineService.exitIP.isEmpty()) {
+                exit = EngineService.country.isEmpty()
+                        ? EngineService.exitIP
+                        : EngineService.country + " " + EngineService.exitIP;
+            }
+        } else if (!lastEndpoint.isEmpty()) {
+            exit = lastEndpoint;
+        }
+        chipExit.setText(exit.isEmpty() ? "出口 —" : "出口 " + exit);
+
+        long uptimeMs = upstream ? EngineService.uptimeMs : 0;
+        if (uptimeMs <= 0 && connectStartAt > 0 && (upstream || TunnelManager.state() == Tunnel.State.UP)) {
+            uptimeMs = System.currentTimeMillis() - connectStartAt;
+        }
+        chipUptime.setText("时长 " + clock(Math.max(0, uptimeMs)));
+    }
+
     private void markReady() {
+        connectStartAt = System.currentTimeMillis();
         connectionReady = true;
         connectionFailed = false;
         startWatchdog();
@@ -1714,15 +1852,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             // connecting/stopping are transient: only a hard error counts.
             return true;
         }
-        if (MihomoVpnService.running) {
-            try {
-                MihomoApi.delay("warp", 3000);
-                return true;
-            } catch (Exception e) {
-                log("看门狗：引擎探测失败 " + (e.getMessage() == null ? "" : e.getMessage()));
-                return false;
-            }
-        }
         if (TunnelManager.state() != Tunnel.State.UP) {
             return false;
         }
@@ -1765,8 +1894,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
         if (lastEngine == 0 && !lastWgConfig.isEmpty()) {
             applyUp(lastWgConfig);
-        } else if (!lastMihomoYaml.isEmpty()) {
-            startMihomoEngine(lastMihomoYaml);
         } else {
             return false;
         }
@@ -1781,38 +1908,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * Proves the tunnel carries traffic: mihomo fetches a URL through the proxy
      * and reports the delay. "接管" alone only means the fd arrived.
      */
-    private void startMihomoCheck() {
-        new Thread(new Runnable() {
-            public void run() {
-                String lastError = "启动器未响应";
-                for (int i = 0; i < 6; i++) {
-                    try {
-                        int delay = MihomoApi.delay("warp", 5000);
-                        log("mihomo 隧道可用，出口延迟 " + delay + " ms");
-                        ui.post(new Runnable() { public void run() { markReady(); render(); } });
-                        return;
-                    } catch (Exception e) {
-                        lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                    }
-                    sleep(1500);
-                }
-                connectionFailed = true;
-                log("mihomo 隧道不通：" + lastError);
-                ui.post(new Runnable() {
-                    public void run() {
-                        render();
-                    }
-                });
-                String tail = MihomoVpnService.recentLog();
-                if (!tail.isEmpty()) {
-                    log("—— 内核输出 ——");
-                    log(tail);
-                }
-            }
-        }, "mihomo-check").start();
-    }
-
-    private void startDisconnect() {
+        private void startDisconnect() {
         // Any in-flight handshake watcher or endpoint retry must not fire after
         // this point; the user asked for "off", not "try again".
         stopToken++;
@@ -1826,9 +1922,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         // Stop everything, not just "ask the library nicely": a leftover engine
         // or a system always-on VPN is what made the tunnel come back by itself.
         try {
-            if (MihomoVpnService.running) {
-                MihomoVpnService.stop(this);
-            }
             if (EngineService.running) {
                 EngineService.stop(this);
             }
@@ -1846,10 +1939,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 }
                 if (!"无".equals(alwaysOn)) {
                     log("系统「始终开启的 VPN」= " + alwaysOn + "，它会在断开后自动重连");
-                }
-                if (MihomoVpnService.running) {
-                    log("引擎仍在运行，再次停止");
-                    MihomoVpnService.stop(MainActivity.this);
                 }
                 render();
             }
@@ -2226,77 +2315,6 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
      * Android lets an app execute a binary shipped as lib*.so inside
      * nativeLibraryDir. Some ROMs refuse, and the answer decides the design.
      */
-    private void probeMihomo() {
-        log("探测 mihomo 内核…");
-        new Thread(new Runnable() {
-            public void run() {
-                StringBuilder report = new StringBuilder();
-                File bin = new File(getApplicationInfo().nativeLibraryDir, "libmihomo.so");
-                report.append("路径 ").append(bin.getAbsolutePath()).append('\n');
-                report.append("存在 ").append(bin.exists()).append(" · 可执行 ").append(bin.canExecute()).append('\n');
-                if (!bin.exists()) {
-                    report.append("结论：当前 ABI 没打包 mihomo（目前只带 arm64-v8a）");
-                    postProbe(report.toString());
-                    return;
-                }
-                if (!bin.canExecute()) {
-                    report.append("chmod +x → ").append(bin.setExecutable(true)).append('\n');
-                }
-                if (!bin.canExecute()) {
-                    report.append("结论：拿不到执行权限，子进程方案不可行");
-                    postProbe(report.toString());
-                    return;
-                }
-
-                final Process process;
-                try {
-                    process = new ProcessBuilder(bin.getAbsolutePath(), "-v")
-                            .redirectErrorStream(true).start();
-                } catch (Exception e) {
-                    report.append("启动失败：").append(e.getMessage());
-                    postProbe(report.toString());
-                    return;
-                }
-
-                final StringBuilder out = new StringBuilder();
-                Thread reader = new Thread(new Runnable() {
-                    public void run() {
-                        try {
-                            BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream()));
-                            String line;
-                            while ((line = r.readLine()) != null) {
-                                out.append(line).append('\n');
-                            }
-                        } catch (Exception ignored) {
-                        }
-                    }
-                });
-                reader.start();
-
-                boolean finished = false;
-                try {
-                    finished = process.waitFor(8, TimeUnit.SECONDS);
-                } catch (InterruptedException ignored) {
-                }
-                if (!finished) {
-                    process.destroyForcibly();
-                }
-                try {
-                    reader.join(1500);
-                } catch (InterruptedException ignored) {
-                }
-
-                report.append("退出码 ").append(finished ? String.valueOf(process.exitValue()) : "超时").append('\n');
-                report.append("输出 ").append(out.toString().trim());
-                report.append("\n\n—— MASQUE 端点 TLS 探测（对照）——\n");
-                report.append(TlsProbe.run(Masque.DEFAULT_SERVER, Masque.DEFAULT_PORT, Masque.SNI));
-                report.append('\n');
-                report.append(TlsProbe.run(Masque.DEFAULT_SERVER, Masque.DEFAULT_PORT, "cloudflare.com"));
-                postProbe(report.toString());
-            }
-        }, "xehn-probe").start();
-    }
-
     private void postProbe(final String report) {
         ui.post(new Runnable() {
             public void run() {

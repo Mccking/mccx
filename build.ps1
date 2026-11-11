@@ -1,6 +1,4 @@
 # Builds xehn-warp-vpn.apk: aapt2 -> javac -> d8 -> zip (+ native wg-go) -> zipalign -> apksigner.
-# Pass -WithMihomo to ship the legacy mihomo engine binaries again.
-param([switch]$WithMihomo)
 $ErrorActionPreference = 'Stop'
 
 $root   = 'E:\deepseek\xehn-vpn'
@@ -50,7 +48,7 @@ Write-Host '== aapt2 link =='
     --manifest "$root\AndroidManifest.xml" `
     --java "$build\gen" `
     --min-sdk-version 24 --target-sdk-version 33 `
-    --version-code 1039 --version-name 3.32 `
+    --version-code 1040 --version-name 3.33 `
     "$build\res.zip"
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
@@ -99,19 +97,6 @@ try {
                 $out.Write($bytes, 0, $bytes.Length)
             } finally { $out.Dispose() }
         }
-        # mihomo/launcher are no longer shipped: the upstream engine replaced them.
-        $extra = "$root\libs\$abi"
-        if ($WithMihomo -and (Test-Path $extra)) {
-            foreach ($so in (Get-ChildItem $extra -Filter *.so)) {
-                $name = "lib/$abi/$($so.Name)"
-                $e = $zip.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
-                $out = $e.Open()
-                try {
-                    $bytes = [System.IO.File]::ReadAllBytes($so.FullName)
-                    $out.Write($bytes, 0, $bytes.Length)
-                } finally { $out.Dispose() }
-            }
-        }
     }
 } finally {
     $zip.Dispose()
@@ -129,7 +114,7 @@ if (-not (Test-Path $ks)) {
         -dname "CN=XEHN WARP VPN, O=XEHN, C=CN"
     if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
 }
-$out = "$dist\mccx-3.32.apk"
+$out = "$dist\mccx-3.33.apk"
 & "$bt\apksigner.bat" sign --ks $ks --ks-pass pass:xehn-apk --key-pass pass:xehn-apk `
     --ks-key-alias xehn --v1-signing-enabled true --v2-signing-enabled true `
     --out $out "$build\aligned.apk"

@@ -55,7 +55,7 @@ public final class MccxTileService extends TileService {
 
     private boolean isTunnelUp() {
         try {
-            return EngineService.running || TunnelManager.isUp() || MihomoVpnService.running;
+            return EngineService.running || TunnelManager.isUp();
         } catch (Throwable t) {
             return false;
         }
@@ -65,12 +65,6 @@ public final class MccxTileService extends TileService {
         try {
             if (EngineService.running) {
                 EngineService.stop(this);
-            }
-        } catch (Throwable ignored) {
-        }
-        try {
-            if (MihomoVpnService.running) {
-                MihomoVpnService.stop(this);
             }
         } catch (Throwable ignored) {
         }

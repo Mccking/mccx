@@ -308,9 +308,9 @@ public final class Warp {
     // -------------------------------------------------------------- ranking
 
     public static final class Probe {
-        final String ip;
-        final long millis;
-        long bytesPerSecond;
+        public final String ip;
+        public final long millis;
+        public long bytesPerSecond;
 
         Probe(String ip, long millis) {
             this.ip = ip;

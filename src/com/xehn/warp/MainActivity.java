@@ -58,6 +58,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     static final String PREFS = "xehn";
     static final String KEY_ACCOUNT = "account";
     static final String KEY_ENDPOINT_CACHE = "endpoint_cache";
+    static final String KEY_AUTO_CHOICE = "auto_choice";
     static final String KEY_PORT = "port_index";
     private static final String KEY_MASQUE = "masque_account";
     private static final String KEY_MASQUE_ENDPOINT = "masque_endpoint";
@@ -107,6 +108,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private TextView chipExit;
     private TextView chipUptime;
     private long connectStartAt;
+    private TextView autoValue;
+    private volatile boolean autoTuning;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
     private int pendingEngine;
@@ -528,6 +531,14 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(settingsRow("第二跳出口", exitValue));
         card.addView(divider());
 
+        autoValue = new TextView(this);
+        autoValue.setText(autoChoiceText());
+        autoValue.setTextColor(C_ACCENT);
+        autoValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        autoValue.setPadding(0, dp(4), 0, dp(4));
+        card.addView(settingsRow("自动优选", autoValue));
+        card.addView(divider());
+
         rulesInput = new EditText(this);
         rulesInput.setText(prefs().getString(KEY_RULES, ""));
         rulesInput.setHint("proxy,1.2.3.0/24（每行一条）");
@@ -758,6 +769,22 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         thirdLp.topMargin = dp(8);
         grid.addView(third, thirdLp);
+
+        LinearLayout fourth = actionRow(
+                actionButton("自动优选", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        runAutoTune();
+                    }
+                }),
+                actionButton("清除优选", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        clearAutoChoice();
+                    }
+                }));
+        LinearLayout.LayoutParams fourthLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        fourthLp.topMargin = dp(8);
+        grid.addView(fourth, fourthLp);
         return grid;
     }
 
@@ -1191,6 +1218,75 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }
     }
 
+    private AutoTune.Choice autoChoice() {
+        AutoTune.Choice choice = AutoTune.Choice.fromJson(prefs().getString(KEY_AUTO_CHOICE, ""));
+        return choice != null && choice.fresh() ? choice : null;
+    }
+
+    private String autoChoiceText() {
+        AutoTune.Choice choice = AutoTune.Choice.fromJson(prefs().getString(KEY_AUTO_CHOICE, ""));
+        if (choice == null) {
+            return "未测试";
+        }
+        long ageMin = Math.max(0, (System.currentTimeMillis() - choice.ts) / 60000L);
+        String age = ageMin < 60 ? ageMin + " 分钟前" : (ageMin / 60) + " 小时前";
+        return choice.label() + " · " + (choice.handshakeMs >= 0 ? choice.handshakeMs + " ms · " : "") + age
+                + (choice.fresh() ? "" : "（已过期）");
+    }
+
+    private void runAutoTune() {
+        if (autoTuning) {
+            return;
+        }
+        if (isTunnelUp()) {
+            toast("请先断开连接，再做自动优选");
+            return;
+        }
+        Warp.Account account = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
+        if (account == null || !account.usable()) {
+            toast("先连接一次内置 WireGuard，生成设备后再优选");
+            return;
+        }
+        autoTuning = true;
+        log("自动优选：开始（会短暂建立两次隧道，请勿操作）");
+        new Thread(new Runnable() {
+            public void run() {
+                AutoTune.Choice choice = null;
+                try {
+                    Warp.Account acc = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
+                    choice = AutoTune.run(MainActivity.this, acc, PORTS, logger);
+                } catch (Throwable t) {
+                    log("自动优选失败：" + t.getMessage());
+                } finally {
+                    autoTuning = false;
+                }
+                final AutoTune.Choice result = choice;
+                ui.post(new Runnable() {
+                    public void run() {
+                        if (result != null) {
+                            prefs().edit().putString(KEY_AUTO_CHOICE, result.toJson()).apply();
+                            autoValue.setText(autoChoiceText());
+                            log("已保存最佳配置：" + result.label());
+                            toast("最佳配置：" + result.label());
+                        } else {
+                            toast("没有测出可用配置，保留原设置");
+                        }
+                        render();
+                    }
+                });
+            }
+        }, "auto-tune").start();
+    }
+
+    private void clearAutoChoice() {
+        prefs().edit().remove(KEY_AUTO_CHOICE).apply();
+        if (autoValue != null) {
+            autoValue.setText(autoChoiceText());
+        }
+        log("已清除自动优选配置");
+        toast("已清除");
+    }
+
     private void startConnect() {
         userDown = false;
         connectionFailed = false;
@@ -1215,8 +1311,19 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 try {
                     Warp.Account existing = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
                     Warp.Result result = null;
+                    AutoTune.Choice auto = autoChoice();
+                    if (auto != null) {
+                        log("使用自动优选配置 " + auto.label());
+                        try {
+                            result = Warp.generateFixed("wg", auto.label(), existing, logger);
+                            lastEndpoint = auto.label();
+                        } catch (Exception e) {
+                            log("自动优选配置失败，改为常规扫描");
+                            result = null;
+                        }
+                    }
                     String cached = cachedEndpointFresh() ? cachedEndpoint() : "";
-                    if (!cached.isEmpty()) {
+                    if (result == null && !cached.isEmpty()) {
                         log("使用预热端点 " + cached);
                         try {
                             result = Warp.generateFixed("wg", cached + ":" + port, existing, logger);

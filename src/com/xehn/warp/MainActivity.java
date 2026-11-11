@@ -55,23 +55,23 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     /** Launcher shortcut / quick-settings tile entry points. */
     public static final String ACTION_CONNECT = "com.xehn.warp.CONNECT";
     public static final String ACTION_DISCONNECT = "com.xehn.warp.DISCONNECT";
-    private static final String PREFS = "xehn";
-    private static final String KEY_ACCOUNT = "account";
-    private static final String KEY_PORT = "port_index";
+    static final String PREFS = "xehn";
+    static final String KEY_ACCOUNT = "account";
+    static final String KEY_PORT = "port_index";
     private static final String KEY_MASQUE = "masque_account";
     private static final String KEY_MASQUE_ENDPOINT = "masque_endpoint";
-    private static final String KEY_ENGINE = "engine_index";
-    private static final String KEY_PROTO = "upstream_proto";
-    private static final String KEY_POLICY = "route_policy";
-    private static final String KEY_DNS = "dns_index";
-    private static final String KEY_IPV6 = "ipv6_enabled";
-    private static final String KEY_MTU = "mtu_index";
-    private static final String KEY_RULES = "custom_rules";
-    private static final String KEY_TIMEOUT = "handshake_timeout_sec";
-    private static final String KEY_EXIT_CANDIDATES = "exit_candidates";
-    private static final String KEY_EXIT_IDS = "exit_ids";
-    private static final String KEY_EXIT_LABEL = "exit_label";
-    private static final String KEY_EXIT_COUNTRY = "exit_country";
+    static final String KEY_ENGINE = "engine_index";
+    static final String KEY_PROTO = "upstream_proto";
+    static final String KEY_POLICY = "route_policy";
+    static final String KEY_DNS = "dns_index";
+    static final String KEY_IPV6 = "ipv6_enabled";
+    static final String KEY_MTU = "mtu_index";
+    static final String KEY_RULES = "custom_rules";
+    static final String KEY_TIMEOUT = "handshake_timeout_sec";
+    static final String KEY_EXIT_CANDIDATES = "exit_candidates";
+    static final String KEY_EXIT_IDS = "exit_ids";
+    static final String KEY_EXIT_LABEL = "exit_label";
+    static final String KEY_EXIT_COUNTRY = "exit_country";
 
     /** Upstream engine protocols, mirrors the desktop flags. */
     private static final String[][] UPSTREAM_PROTOS = {
@@ -81,7 +81,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             {"masque-h2", "MASQUE (HTTP/2)"},
             {"wwarp", "WARP-in-WARP"},
     };
-    private static final int[] PORTS = {2408, 500, 1701, 443};
+    static final int[] PORTS = {2408, 500, 1701, 443};
     private static final int LOG_LINES = 12;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -622,16 +622,16 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         grid.addView(actionRow(
                 actionButton("重新自检", new View.OnClickListener() {
                     public void onClick(View v) {
-                        if (TunnelManager.state() == Tunnel.State.UP) {
+                        if (isTunnelUp()) {
                             startSelfCheck();
                         } else {
                             toast("请先连接");
                         }
                     }
                 }),
-                actionButton("测试内核", new View.OnClickListener() {
+                actionButton("出口体检", new View.OnClickListener() {
                     public void onClick(View v) {
-                        probeMihomo();
+                        runExitCheck();
                     }
                 })));
 
@@ -640,17 +640,33 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         rowLp.topMargin = dp(8);
 
         LinearLayout second = actionRow(
+                actionButton("测试内核", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        probeMihomo();
+                    }
+                }),
                 actionButton("检查更新", new View.OnClickListener() {
                     public void onClick(View v) {
                         checkUpdate();
                     }
-                }),
+                }));
+        grid.addView(second, rowLp);
+
+        LinearLayout third = actionRow(
                 actionButton("重置设备", new View.OnClickListener() {
                     public void onClick(View v) {
                         resetDevice();
                     }
+                }),
+                actionButton("分享日志", new View.OnClickListener() {
+                    public void onClick(View v) {
+                        shareLog();
+                    }
                 }));
-        grid.addView(second, rowLp);
+        LinearLayout.LayoutParams thirdLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        thirdLp.topMargin = dp(8);
+        grid.addView(third, thirdLp);
         return grid;
     }
 
@@ -875,6 +891,30 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             }
         }
         return order;
+    }
+
+    /** Real requests through the tunnel: exit IP, reachability and round trips. */
+    private void runExitCheck() {
+        if (!isTunnelUp()) {
+            toast("请先连接");
+            return;
+        }
+        log("出口体检…");
+        new Thread(new Runnable() {
+            public void run() {
+                final String report = ExitCheck.run();
+                ui.post(new Runnable() {
+                    public void run() {
+                        log(report.trim());
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("出口体检")
+                                .setMessage(report)
+                                .setPositiveButton("好", null)
+                                .show();
+                    }
+                });
+            }
+        }, "exit-check").start();
     }
 
     private void startConnect() {

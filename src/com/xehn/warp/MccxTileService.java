@@ -27,11 +27,30 @@ public final class MccxTileService extends TileService {
             refreshTile();
             return;
         }
+        // Connect without opening the app. The activity is only needed the very
+        // first time, for the system VPN consent dialog.
+        if (HeadlessConnect.consentGranted(this)) {
+            HeadlessConnect.connect(this);
+            refreshTile();
+            scheduleRefresh(2500);
+            scheduleRefresh(8000);
+            return;
+        }
         Intent intent = new Intent(this, MainActivity.class)
                 .setAction(MainActivity.ACTION_CONNECT)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         collapseTo(intent);
         refreshTile();
+    }
+
+    /** Keeps the tile honest while the tunnel comes up in the background. */
+    private void scheduleRefresh(long delayMs) {
+        android.os.Handler handler = new android.os.Handler(getMainLooper());
+        handler.postDelayed(new Runnable() {
+            public void run() {
+                refreshTile();
+            }
+        }, delayMs);
     }
 
     private boolean isTunnelUp() {
@@ -91,8 +110,19 @@ public final class MccxTileService extends TileService {
                 return;
             }
             boolean up = isTunnelUp();
-            tile.setState(up ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
-            tile.setLabel(up ? "MccX 已连接" : "MccX");
+            if (up) {
+                tile.setState(Tile.STATE_ACTIVE);
+                tile.setLabel("MccX 已连接");
+            } else if (HeadlessConnect.connecting) {
+                tile.setState(Tile.STATE_UNAVAILABLE);
+                tile.setLabel("MccX 连接中…");
+            } else if (!HeadlessConnect.lastError.isEmpty()) {
+                tile.setState(Tile.STATE_INACTIVE);
+                tile.setLabel("MccX 连接失败");
+            } else {
+                tile.setState(Tile.STATE_INACTIVE);
+                tile.setLabel("MccX");
+            }
             tile.updateTile();
         } catch (Throwable ignored) {
         }

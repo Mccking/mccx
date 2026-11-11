@@ -136,6 +136,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private long lastRxBytes;
     private int lastEngine;
     private String lastWgConfig = "";
+    private Warp.Result lastWgResult;
     private String lastMihomoYaml = "";
     private volatile String[] lastUpstreamArgs;
     private volatile boolean engineRestartPending;
@@ -658,9 +659,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         resetDevice();
                     }
                 }),
-                actionButton("分享日志", new View.OnClickListener() {
+                actionButton("导出配置", new View.OnClickListener() {
                     public void onClick(View v) {
-                        shareLog();
+                        exportConfig();
                     }
                 }));
         LinearLayout.LayoutParams thirdLp = new LinearLayout.LayoutParams(
@@ -893,6 +894,69 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         return order;
     }
 
+    /** Shares the working profile so other devices/clients can import it. */
+    private void exportConfig() {
+        if (lastWgResult == null || lastWgConfig.isEmpty()) {
+            toast("先用内置 WireGuard 连接一次，成功后才能导出");
+            return;
+        }
+        final String endpoint = lastWgResult.endpoint;
+        new AlertDialog.Builder(this)
+                .setTitle("导出配置")
+                .setMessage("当前优选端点：" + endpoint
+                        + "\n\n可以导出为 WireGuard 配置（任何 WG 客户端都能导入），"
+                        + "或 mihomo / Clash 配置。")
+                .setPositiveButton("WireGuard", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) {
+                        shareConfig(false);
+                    }
+                })
+                .setNeutralButton("Clash", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) {
+                        shareConfig(true);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void shareConfig(boolean clash) {
+        String body = clash
+                ? ConfigExport.clash(lastWgResult)
+                : ConfigExport.wireGuard(lastWgResult);
+        if (body.isEmpty()) {
+            toast("配置为空，请重新连接后导出");
+            return;
+        }
+        String name = ConfigExport.fileName(clash);
+        String path = "";
+        try {
+            java.io.File dir = getExternalFilesDir("export");
+            if (dir != null) {
+                if (!dir.exists() && !dir.mkdirs()) {
+                    dir = null;
+                }
+            }
+            if (dir != null) {
+                java.io.File file = new java.io.File(dir, name);
+                java.io.FileWriter writer = new java.io.FileWriter(file);
+                try {
+                    writer.write(body);
+                } finally {
+                    writer.close();
+                }
+                path = file.getAbsolutePath();
+            }
+        } catch (Exception ignored) {
+        }
+        log("已导出 " + name + (path.isEmpty() ? "" : " → " + path));
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_SUBJECT, name);
+        intent.putExtra(Intent.EXTRA_TEXT, body);
+        startActivity(Intent.createChooser(intent, "分享 " + name));
+    }
+
     /** Real requests through the tunnel: exit IP, reachability and round trips. */
     private void runExitCheck() {
         if (!isTunnelUp()) {
@@ -947,6 +1011,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                             .apply();
                     lastEndpoint = result.endpoint;
                     lastLatency = result.latencyMs;
+                    lastWgResult = result;
                     int split = result.endpoint.lastIndexOf(':');
                     endpointHost = split > 0 ? result.endpoint.substring(0, split) : result.endpoint;
 
@@ -1922,6 +1987,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         return;
                     }
                     lastEndpoint = retry.endpoint;
+                    lastWgResult = retry;
                     lastLatency = -1;
                     TunnelManager.down();
                     ui.post(new Runnable() {
@@ -1951,6 +2017,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         return;
                     }
                     lastEndpoint = fixed.endpoint;
+                    lastWgResult = fixed;
                     lastLatency = -1;
                     TunnelManager.down();
                     ui.post(new Runnable() {

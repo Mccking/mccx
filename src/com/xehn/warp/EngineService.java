@@ -72,6 +72,8 @@ public final class EngineService extends VpnService {
     public static volatile long uptimeMs;
     /** The engine decided the session is dead and wants a reconnect. */
     public static volatile boolean needRecover;
+    /** Updated by the poller; a stale value means the service was killed. */
+    public static volatile long lastTickAt;
 
     private static final ArrayDeque<String> RECENT = new ArrayDeque<String>();
 
@@ -120,6 +122,7 @@ public final class EngineService extends VpnService {
     private int cfgTimeout = 5;
     private int recoverAttempts;
     private long recoverWindowStart;
+    private int pollGeneration;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -156,6 +159,12 @@ public final class EngineService extends VpnService {
         cfgExitLabel = exitLabel;
         cfgExitCountry = exitCountry;
         cfgTimeout = timeoutSec;
+        stopped = false;
+        startForegroundWith("正在连接…");
+        if (engine != null || tun != null) {
+            // A previous instance may still be around (service restarted).
+            teardown();
+        }
         try {
             File dir = new File(getFilesDir(), "engine");
             if (!dir.exists() && !dir.mkdirs()) {
@@ -222,7 +231,7 @@ public final class EngineService extends VpnService {
             running = true;
             startForegroundWith("连接中…");
             refreshCnRoutesIfStale(policy);
-            startPoller();
+            startPoller(++pollGeneration);
         } catch (Throwable t) {
             lastLog = "启动失败：" + (t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
             remember(lastLog);
@@ -443,12 +452,12 @@ public final class EngineService extends VpnService {
         } catch (Throwable ignored) {
         }
     }
-    private void startPoller() {
+    private void startPoller(final int generation) {
         poller = new Thread(new Runnable() {
             public void run() {
                 String previous = "";
                 int ticks = 0;
-                while (!stopped) {
+                while (!stopped && generation == pollGeneration) {
                     try {
                         Thread.sleep(POLL_MS);
                     } catch (InterruptedException e) {
@@ -456,6 +465,11 @@ public final class EngineService extends VpnService {
                     }
                     if (engine == null) {
                         return;
+                    }
+                    lastTickAt = System.currentTimeMillis();
+                    if (tun == null || !new java.io.File("/proc/self/fd/" + tun.getFd()).exists()) {
+                        remember("VPN 已被系统收回（tun 失效），正在重连");
+                        needRecover = true;
                     }
                     try {
                         applyStatus(engine.statusJSON());
@@ -468,6 +482,10 @@ public final class EngineService extends VpnService {
                                     updateNotification(label);
                                 }
                             });
+                        }
+                        if ("connected".equals(state) && exitIP.isEmpty() && ticks > 15) {
+                            remember("引擎报已连接但拿不到出口地址，按半开隧道处理");
+                            needRecover = true;
                         }
                         if ("error".equals(state) || needRecover) {
                             needRecover = false;

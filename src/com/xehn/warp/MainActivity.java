@@ -260,8 +260,15 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         }, 450);
     }
 
+    /** Connected means: engine reports connected AND the service is still ticking. */
+    private boolean upstreamUp() {
+        return EngineService.running
+                && EngineService.connected()
+                && System.currentTimeMillis() - EngineService.lastTickAt < 4000;
+    }
+
     private boolean isTunnelUp() {
-        return EngineService.running || TunnelManager.state() == Tunnel.State.UP;
+        return upstreamUp() || TunnelManager.state() == Tunnel.State.UP;
     }
 
     @Override
@@ -893,7 +900,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private void render() {
         boolean up = EngineService.running || TunnelManager.state() == Tunnel.State.UP;
         boolean upstream = lastEngine == 3 && EngineService.running;
-        if (!busy && upstream && EngineService.connected()) {
+        boolean upstreamLive = lastEngine == 3 && upstreamUp();
+        if (!busy && upstreamLive) {
             statusView.setText("已连接");
             statusView.setTextColor(C_OK);
             statusDot.setTextColor(C_OK);
@@ -901,6 +909,16 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             connectButton.setEnabled(true);
             styleConnectButton(true, false);
         } else if (!busy && upstream && "error".equals(EngineService.state)) {
+            statusView.setText("连接异常");
+            statusView.setTextColor(C_DANGER);
+            statusDot.setTextColor(C_DANGER);
+            connectButton.setText("断开");
+            connectButton.setEnabled(true);
+            styleConnectButton(true, false);
+        } else if (!busy && upstream && EngineService.lastTickAt > 0
+                && System.currentTimeMillis() - EngineService.lastTickAt > 5000) {
+            // The engine service stopped ticking: the tunnel is gone even though
+            // its last reported state was "connected".
             statusView.setText("连接异常");
             statusView.setTextColor(C_DANGER);
             statusDot.setTextColor(C_DANGER);
@@ -1090,7 +1108,22 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 StringBuilder report = new StringBuilder();
                 report.append("App ").append(versionName()).append("（").append(Updater.currentVersionCode(MainActivity.this)).append("）\n");
                 report.append("引擎：").append(lastEngine == 3 ? "上游引擎" : "内置 WireGuard").append('\n');
-                report.append("状态：").append(lastEngine == 3 ? EngineService.state : String.valueOf(TunnelManager.state())).append('\n');
+                report.append("系统 VPN 接口：").append(vpnInterfaceUp() ? "已建立" : "未建立").append('\n');
+                report.append("服务存活：").append(EngineService.running ? "是" : "否");
+                if (EngineService.lastTickAt > 0) {
+                    report.append("（心跳 ").append(Math.max(0,
+                            (System.currentTimeMillis() - EngineService.lastTickAt) / 1000)).append(" 秒前）");
+                }
+                report.append('\n');
+                report.append("引擎状态：").append(EngineService.state.isEmpty() ? "—" : EngineService.state);
+                if (EngineService.needRecover) {
+                    report.append("（needRecover）");
+                }
+                if (!EngineService.message.isEmpty()) {
+                    report.append(" · ").append(EngineService.message);
+                }
+                report.append('\n');
+                report.append("内置 WG 状态：").append(TunnelManager.state()).append('\n');
                 report.append("端点：").append(lastEndpoint.isEmpty() ? "未连接" : lastEndpoint).append('\n');
                 report.append("\n—— MASQUE 端点 TLS 探测（对照）——\n");
                 report.append(TlsProbe.run(MASQUE_HOST, MASQUE_PORT, MASQUE_SNI));
@@ -1120,6 +1153,25 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                         .show();
             }
         });
+    }
+
+    /** Is there a VPN network interface belonging to this app right now? */
+    private boolean vpnInterfaceUp() {
+        try {
+            ConnectivityManager manager =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) {
+                return false;
+            }
+            for (android.net.Network network : manager.getAllNetworks()) {
+                android.net.NetworkCapabilities caps = manager.getNetworkCapabilities(network);
+                if (caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private void runExitCheck() {

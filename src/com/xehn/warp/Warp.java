@@ -101,6 +101,10 @@ public final class Warp {
         public String ipv6 = "";
         public String clientId = "";
         public boolean warpEnabled;
+        /** "free" / "limited" / "premium" as reported by the API. */
+        public String accountType = "";
+        /** Licence key currently enrolled, if any. */
+        public String license = "";
 
         public boolean usable() {
             return id.length() > 0 && token.length() > 0 && peerPublicKey.length() > 0;
@@ -117,6 +121,8 @@ public final class Warp {
                 o.put("ipv6", ipv6);
                 o.put("client_id", clientId);
                 o.put("warp_enabled", warpEnabled);
+                o.put("account_type", accountType);
+                o.put("license", license);
                 return o.toString();
             } catch (Exception e) {
                 return "";
@@ -138,6 +144,8 @@ public final class Warp {
                 a.ipv6 = o.optString("ipv6", "");
                 a.clientId = o.optString("client_id", "");
                 a.warpEnabled = o.optBoolean("warp_enabled", false);
+                a.accountType = o.optString("account_type", "");
+                a.license = o.optString("license", "");
                 return a.usable() ? a : null;
             } catch (Exception e) {
                 return null;
@@ -303,6 +311,41 @@ public final class Warp {
         } finally {
             response.close();
         }
+    }
+
+    /**
+     * Enrolls a WARP+ licence key on the current device.
+     *
+     * <p>Same endpoint and body the official clients use: PATCH the device with
+     * {@code {"license": "..."}}. The response carries the new account type, so
+     * the caller can show free vs premium without a second request.
+     */
+    public static Account applyLicense(Account account, String licenseKey, Log log) throws Exception {
+        String key = licenseKey == null ? "" : licenseKey.trim();
+        if (key.isEmpty()) {
+            throw new IOException("许可证为空");
+        }
+        if (account == null || !account.usable()) {
+            throw new IOException("还没有注册设备，请先连接一次");
+        }
+        JSONObject body = new JSONObject();
+        body.put("license", key);
+        String response = request("PATCH", REG_URL + "/" + account.id, body.toString(), account.token);
+        JSONObject root = new JSONObject(response);
+        JSONObject accountJson = root.optJSONObject("account");
+        if (accountJson != null) {
+            account.accountType = accountJson.optString("account_type", "");
+            String enrolled = accountJson.optString("license", "");
+            if (!enrolled.isEmpty()) {
+                account.license = enrolled;
+            }
+        }
+        if (account.accountType.isEmpty()) {
+            account.accountType = "unknown";
+        }
+        log.log("WARP+ 已激活：" + account.accountType + "（"
+                + (account.license.isEmpty() ? "无序列号" : account.license) + "）");
+        return account;
     }
 
     // -------------------------------------------------------------- ranking

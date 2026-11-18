@@ -87,7 +87,8 @@ public final class HeadlessConnect {
                     exitIds,
                     prefs.getString(MainActivity.KEY_EXIT_LABEL, ""),
                     prefs.getString(MainActivity.KEY_EXIT_COUNTRY, ""),
-                    timeout);
+                    timeout,
+                    prefs.getBoolean(MainActivity.KEY_PROXY_ONLY, false));
             LogStore.append("快捷连接：上游引擎 " + PROTOS[protoIndex]);
         } catch (Throwable t) {
             lastError = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();

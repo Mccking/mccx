@@ -59,6 +59,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     static final String KEY_ACCOUNT = "account";
     static final String KEY_ENDPOINT_CACHE = "endpoint_cache";
     static final String KEY_AUTO_CHOICE = "auto_choice";
+    static final String KEY_PROXY_ONLY = "proxy_only";
     static final String KEY_PORT = "port_index";
     private static final String KEY_MASQUE = "masque_account";
     private static final String KEY_MASQUE_ENDPOINT = "masque_endpoint";
@@ -109,6 +110,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private TextView chipUptime;
     private long connectStartAt;
     private TextView autoValue;
+    private TextView planValue;
+    private Switch proxySwitch;
     private volatile boolean autoTuning;
     private Spinner engineSpinner;
     private Warp.Result pendingResult;
@@ -490,6 +493,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         card.addView(settingsRow("MTU", mtuSpinner));
         card.addView(divider());
 
+        proxySwitch = new Switch(this);
+        proxySwitch.setChecked(prefs().getBoolean(KEY_PROXY_ONLY, false));
+        card.addView(settingsRow("仅代理模式", proxySwitch));
+
         timeoutSpinner = new Spinner(this);
         timeoutSpinner.setAdapter(spinnerAdapter(new String[]{"3 秒", "5 秒", "8 秒"}));
         timeoutSpinner.setSelection(prefs().getInt(KEY_TIMEOUT, 1));
@@ -504,6 +511,19 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         portSpinner.setAdapter(spinnerAdapter(portLabels));
         portSpinner.setSelection(prefs().getInt(KEY_PORT, 2));
         card.addView(settingsRow("端点端口", portSpinner));
+
+        card.addView(sectionLabel("账户"));
+        planValue = new TextView(this);
+        planValue.setText(planText());
+        planValue.setTextColor(C_ACCENT);
+        planValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        planValue.setPadding(0, dp(4), 0, dp(4));
+        planValue.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showLicenseDialog();
+            }
+        });
+        card.addView(settingsRow("WARP+", planValue));
 
         card.addView(sectionLabel("网络"));
         dnsSpinner = new Spinner(this);
@@ -565,6 +585,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
     private void connectUpstream() {
         int engineIndex = engineSpinner == null ? 0 : engineSpinner.getSelectedItemPosition();
         prefs().edit().putInt(KEY_ENGINE, engineIndex).apply();
+        if (proxyOnlyEnabled()) {
+            log("仅代理模式：不建立系统 VPN，本机 " + EngineService.SOCKS_ADDR + " 提供 SOCKS5");
+        }
         lastEngine = 3;
         upstreamConnectStart = System.currentTimeMillis();
         upstreamFallbackTried = false;
@@ -580,7 +603,7 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         EngineService.start(this, lastUpstreamArgs[0], lastUpstreamArgs[1], lastUpstreamArgs[2],
                 "1".equals(lastUpstreamArgs[3]), Integer.parseInt(lastUpstreamArgs[4]), lastUpstreamArgs[5],
                 exitIdsForConnect(), lastUpstreamArgs[7], lastUpstreamArgs[8],
-                Integer.parseInt(lastUpstreamArgs[9]));
+                Integer.parseInt(lastUpstreamArgs[9]), proxyOnlyEnabled());
         scheduleEngineCheck();
     }
 
@@ -1124,6 +1147,10 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                 }
                 report.append('\n');
                 report.append("内置 WG 状态：").append(TunnelManager.state()).append('\n');
+                report.append("账户：").append(planText()).append('\n');
+                if (proxyOnlyEnabled()) {
+                    report.append("仅代理模式：SOCKS5 ").append(EngineService.SOCKS_ADDR).append('\n');
+                }
                 report.append("端点：").append(lastEndpoint.isEmpty() ? "未连接" : lastEndpoint).append('\n');
                 report.append("\n—— MASQUE 端点 TLS 探测（对照）——\n");
                 report.append(TlsProbe.run(MASQUE_HOST, MASQUE_PORT, MASQUE_SNI));
@@ -1275,6 +1302,82 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         return choice != null && choice.fresh() ? choice : null;
     }
 
+    private String planText() {
+        Warp.Account account = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
+        if (account == null || !account.usable()) {
+            return "未注册（连接一次即可）";
+        }
+        String type = account.accountType == null ? "" : account.accountType;
+        if ("premium".equals(type)) {
+            return "WARP+ 已激活";
+        }
+        if ("limited".equals(type)) {
+            return "WARP+ 已到期";
+        }
+        if (type.isEmpty()) {
+            return "免费版（点此输入许可证）";
+        }
+        return "免费版（点此输入许可证）";
+    }
+
+    /** WARP+ licence entry; the key is enrolled on the current device. */
+    private void showLicenseDialog() {
+        Warp.Account account = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
+        if (account == null || !account.usable()) {
+            toast("先连接一次生成设备，再激活 WARP+");
+            return;
+        }
+        final EditText input = new EditText(this);
+        input.setHint("xxxxxxxx-xxxxxxxx-xxxxxxxx");
+        input.setHintTextColor(C_MUTED);
+        input.setTextColor(C_TEXT);
+        input.setText(account.license);
+        input.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("WARP+ 许可证")
+                .setView(input)
+                .setPositiveButton("激活", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) {
+                        activateLicense(input.getText().toString());
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void activateLicense(final String key) {
+        if (key == null || key.trim().isEmpty()) {
+            toast("许可证为空");
+            return;
+        }
+        log("正在激活 WARP+…");
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Warp.Account account = Warp.Account.fromJson(prefs().getString(KEY_ACCOUNT, ""));
+                    Warp.Account updated = Warp.applyLicense(account, key, logger);
+                    prefs().edit().putString(KEY_ACCOUNT, updated.toJson()).apply();
+                    final String type = updated.accountType;
+                    ui.post(new Runnable() {
+                        public void run() {
+                            planValue.setText(planText());
+                            log("WARP+ 状态：" + type);
+                            toast("premium".equals(type) ? "WARP+ 已激活" : "当前套餐：" + type);
+                        }
+                    });
+                } catch (final Exception e) {
+                    ui.post(new Runnable() {
+                        public void run() {
+                            String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                            log("WARP+ 激活失败：" + msg);
+                            toast("激活失败：" + msg);
+                        }
+                    });
+                }
+            }
+        }, "warp-license").start();
+    }
+
     private String autoChoiceText() {
         AutoTune.Choice choice = AutoTune.Choice.fromJson(prefs().getString(KEY_AUTO_CHOICE, ""));
         if (choice == null) {
@@ -1354,6 +1457,9 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         final int portIndex = Math.max(0, portSpinner.getSelectedItemPosition());
         final int port = PORTS[portIndex];
         final int engine = engineSpinner.getSelectedItemPosition() == 0 ? 0 : 3;
+        if (engine == 0 && proxyOnlyEnabled()) {
+            log("仅代理模式只对上游引擎生效，本次使用 VPN 模式");
+        }
         prefs().edit().putInt(KEY_ENGINE, engineSpinner.getSelectedItemPosition()).apply();
         portPlan = orderPorts(portIndex);
         portAttempt = 0;
@@ -1402,7 +1508,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
                     final Warp.Result finalResult = result;
                     ui.post(new Runnable() {
                         public void run() {
-                            Intent consent = VpnService.prepare(MainActivity.this);
+                            boolean noTunMode = engine == 3 && proxyOnlyEnabled();
+                            Intent consent = noTunMode ? null : VpnService.prepare(MainActivity.this);
                             if (consent != null) {
                                 pendingConfig = configText;
                                 pendingEngine = engine;
@@ -1652,6 +1759,13 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
         } catch (Exception ignored) {
         }
     }
+    private boolean proxyOnlyEnabled() {
+        boolean value = proxySwitch == null ? prefs().getBoolean(KEY_PROXY_ONLY, false)
+                : proxySwitch.isChecked();
+        prefs().edit().putBoolean(KEY_PROXY_ONLY, value).apply();
+        return value;
+    }
+
     private int handshakeTimeout() {
         int[] values = {3, 5, 8};
         int index = timeoutSpinner == null ? prefs().getInt(KEY_TIMEOUT, 1)
@@ -1872,7 +1986,8 @@ public final class MainActivity extends Activity implements WarpTunnel.Listener 
             public void run() {
                 EngineService.start(MainActivity.this, args[0], args[1], args[2],
                         "1".equals(args[3]), Integer.parseInt(args[4]), args[5],
-                        exitIdsForConnect(), args[7], args[8], Integer.parseInt(args[9]));
+                        exitIdsForConnect(), args[7], args[8], Integer.parseInt(args[9]),
+                        proxyOnlyEnabled());
                 engineRestartPending = false;
             }
         }, 800);

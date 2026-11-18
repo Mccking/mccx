@@ -46,11 +46,14 @@ public final class EngineService extends VpnService {
     public static final String EXTRA_MTU = "mtu";
     public static final String EXTRA_RULES = "rules";
     public static final String EXTRA_TIMEOUT = "timeout_sec";
+    public static final String EXTRA_PROXY_ONLY = "proxy_only";
     public static final String EXTRA_EXIT_IDS = "exit_ids";
     public static final String EXTRA_EXIT_LABEL = "exit_label";
     public static final String EXTRA_EXIT_COUNTRY = "exit_country";
 
     private static final int DEFAULT_MTU = 1280;
+    /** Local SOCKS5 address used by proxy-only mode (no system VPN involved). */
+    public static final String SOCKS_ADDR = "127.0.0.1:1080";
     private static final String CHANNEL_ID = "mccx-tunnel";
     private static final int NOTIFICATION_ID = 1001;
     private static final long POLL_MS = 1000;
@@ -123,6 +126,7 @@ public final class EngineService extends VpnService {
     private int recoverAttempts;
     private long recoverWindowStart;
     private int pollGeneration;
+    private boolean cfgProxyOnly;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -142,13 +146,14 @@ public final class EngineService extends VpnService {
                 intent.getStringExtra(EXTRA_EXIT_IDS),
                 intent.getStringExtra(EXTRA_EXIT_LABEL),
                 intent.getStringExtra(EXTRA_EXIT_COUNTRY),
-                intent.getIntExtra(EXTRA_TIMEOUT, 5));
+                intent.getIntExtra(EXTRA_TIMEOUT, 5),
+                intent.getBooleanExtra(EXTRA_PROXY_ONLY, false));
         return START_NOT_STICKY;
     }
 
     private void startTunnel(String protoName, String policy, String dns, boolean ipv6, int mtu,
                              String rules, String exitIds, String exitLabel, String exitCountry,
-                             int timeoutSec) {
+                             int timeoutSec, boolean proxyOnly) {
         cfgProto = protoName;
         cfgPolicy = policy;
         cfgDns = dns;
@@ -159,8 +164,9 @@ public final class EngineService extends VpnService {
         cfgExitLabel = exitLabel;
         cfgExitCountry = exitCountry;
         cfgTimeout = timeoutSec;
+        cfgProxyOnly = proxyOnly;
         stopped = false;
-        startForegroundWith("正在连接…");
+        startForegroundWith(proxyOnly ? "代理模式 · " + SOCKS_ADDR : "正在连接…");
         if (engine != null || tun != null) {
             // A previous instance may still be around (service restarted).
             teardown();
@@ -183,10 +189,13 @@ public final class EngineService extends VpnService {
                 }
             });
             engine.setTimeout(timeoutSec > 0 ? timeoutSec : 5);
-            engine.setSocksListen("");
+            engine.setSocksListen(proxyOnly ? SOCKS_ADDR : "");
 
             boolean hasExit = exitIds != null && !exitIds.trim().isEmpty();
-            if (hasExit) {
+            if (proxyOnly) {
+                engine.setVPNState(false);
+                remember("仅代理模式：SOCKS5 监听 " + SOCKS_ADDR);
+            } else if (hasExit) {
                 // The second hop owns the system tun: the engine asks for one via
                 // TunProvider once the OpenVPN handshake pushes its address.
                 engine.setOpenVPNExit(exitIds.trim(), nullToEmpty(exitLabel), nullToEmpty(exitCountry));
@@ -467,7 +476,8 @@ public final class EngineService extends VpnService {
                         return;
                     }
                     lastTickAt = System.currentTimeMillis();
-                    if (tun == null || !new java.io.File("/proc/self/fd/" + tun.getFd()).exists()) {
+                    if (!cfgProxyOnly && (tun == null
+                            || !new java.io.File("/proc/self/fd/" + tun.getFd()).exists())) {
                         remember("VPN 已被系统收回（tun 失效），正在重连");
                         needRecover = true;
                     }
@@ -497,7 +507,8 @@ public final class EngineService extends VpnService {
                             remember("状态：" + state
                                     + (message.isEmpty() ? "" : "（" + message + "）"));
                             final String label = "connected".equals(state)
-                                    ? (country.isEmpty() ? "已连接" : "已连接 · " + country + " " + exitIP)
+                                    ? (cfgProxyOnly ? "代理就绪 · " + SOCKS_ADDR
+                                    : (country.isEmpty() ? "已连接" : "已连接 · " + country + " " + exitIP))
                                     : ("connecting".equals(state) ? "连接中…" : state);
                             uiPost(new Runnable() {
                                 public void run() {
@@ -581,7 +592,7 @@ public final class EngineService extends VpnService {
             return;
         }
         startTunnel(cfgProto, cfgPolicy, cfgDns, cfgIpv6, cfgMtu, cfgRules,
-                cfgExitIds, cfgExitLabel, cfgExitCountry, cfgTimeout);
+                cfgExitIds, cfgExitLabel, cfgExitCountry, cfgTimeout, cfgProxyOnly);
     }
 
     /** Drops the engine and the tun but keeps the service alive. */
@@ -637,7 +648,8 @@ public final class EngineService extends VpnService {
 
     public static void start(Context context, String proto, String policy,
                              String dns, boolean ipv6, int mtu, String rules,
-                             String exitIds, String exitLabel, String exitCountry, int timeoutSec) {
+                             String exitIds, String exitLabel, String exitCountry, int timeoutSec,
+                             boolean proxyOnly) {
         Intent intent = new Intent(context, EngineService.class)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_PROTO, proto)
@@ -649,7 +661,8 @@ public final class EngineService extends VpnService {
                 .putExtra(EXTRA_EXIT_IDS, exitIds)
                 .putExtra(EXTRA_EXIT_LABEL, exitLabel)
                 .putExtra(EXTRA_EXIT_COUNTRY, exitCountry)
-                .putExtra(EXTRA_TIMEOUT, timeoutSec);
+                .putExtra(EXTRA_TIMEOUT, timeoutSec)
+                .putExtra(EXTRA_PROXY_ONLY, proxyOnly);
         context.startService(intent);
     }
 
